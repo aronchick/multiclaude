@@ -507,11 +507,20 @@ func (d *Daemon) handleAddAgent(req socket.Request) socket.Response {
 		sessionID = fmt.Sprintf("agent-%d", time.Now().UnixNano())
 	}
 
+	// Get PID from args (optional)
+	var pid int
+	if pidFloat, ok := req.Args["pid"].(float64); ok {
+		pid = int(pidFloat)
+	} else if pidInt, ok := req.Args["pid"].(int); ok {
+		pid = pidInt
+	}
+
 	agent := state.Agent{
 		Type:         state.AgentType(agentTypeStr),
 		WorktreePath: worktreePath,
 		TmuxWindow:   tmuxWindow,
 		SessionID:    sessionID,
+		PID:          pid,
 		CreatedAt:    time.Now(),
 	}
 
