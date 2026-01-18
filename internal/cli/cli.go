@@ -444,6 +444,11 @@ func (c *CLI) initRepo(args []string) error {
 		return fmt.Errorf("failed to write merge-queue prompt: %w", err)
 	}
 
+	// Copy hooks configuration if it exists (for supervisor and merge-queue)
+	if err := c.copyHooksConfig(repoPath, repoPath); err != nil {
+		fmt.Printf("Warning: failed to copy hooks config: %v\n", err)
+	}
+
 	// Start Claude in supervisor window (skip in test mode)
 	if os.Getenv("MULTICLAUDE_TEST_MODE") != "1" {
 		fmt.Println("Starting Claude Code in supervisor window...")
@@ -653,6 +658,11 @@ func (c *CLI) createWorker(args []string) error {
 	workerPromptFile, err := c.writePromptFile(repoPath, prompts.TypeWorker, workerName)
 	if err != nil {
 		return fmt.Errorf("failed to write worker prompt: %w", err)
+	}
+
+	// Copy hooks configuration if it exists
+	if err := c.copyHooksConfig(repoPath, wtPath); err != nil {
+		fmt.Printf("Warning: failed to copy hooks config: %v\n", err)
 	}
 
 	// Start Claude in worker window with initial task (skip in test mode)
@@ -1423,6 +1433,38 @@ func (c *CLI) writePromptFile(repoPath string, agentType prompts.AgentType, agen
 	}
 
 	return promptPath, nil
+}
+
+// copyHooksConfig copies hooks configuration from repo to worktree if it exists
+func (c *CLI) copyHooksConfig(repoPath, worktreePath string) error {
+	hooksPath := filepath.Join(repoPath, ".multiclaude", "hooks.json")
+
+	// Check if hooks.json exists
+	if _, err := os.Stat(hooksPath); os.IsNotExist(err) {
+		// No hooks config, that's fine
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to check hooks config: %w", err)
+	}
+
+	// Create .claude directory in worktree
+	claudeDir := filepath.Join(worktreePath, ".claude")
+	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .claude directory: %w", err)
+	}
+
+	// Copy hooks.json to .claude/settings.json
+	hooksData, err := os.ReadFile(hooksPath)
+	if err != nil {
+		return fmt.Errorf("failed to read hooks config: %w", err)
+	}
+
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	if err := os.WriteFile(settingsPath, hooksData, 0644); err != nil {
+		return fmt.Errorf("failed to write settings.json: %w", err)
+	}
+
+	return nil
 }
 
 // startClaudeInTmux starts Claude Code in a tmux window with the given configuration
