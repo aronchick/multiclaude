@@ -207,3 +207,11 @@ Core Claude Code integration is COMPLETE! The system now:
   - Gets repo list from daemon or state file
   - Finds and kills all mc-* tmux sessions including orphans
   - Committed: 8e10cb2
+- 2026-01-18 16:45 - ✅ Fixed session ID format to proper UUID v4
+  - Claude requires UUIDs with dashes, not plain hex strings
+  - Updated generateSessionID() to format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  - Committed: 75f5701
+- 2026-01-18 16:50 - ✅ Added --dangerously-skip-permissions flag
+  - Agents were stuck on Claude's repo permission prompt
+  - Added flag to allow autonomous operation in isolated worktrees
+  - Committed: d7b5846
