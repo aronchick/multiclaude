@@ -198,3 +198,12 @@ Core Claude Code integration is COMPLETE! The system now:
 - Agent intelligence behaviors will be validated through actual use
 
 **Ready for manual end-to-end testing with real Claude instances!**
+
+### Post-Phase 3 Additions
+
+- 2026-01-18 16:30 - ✅ Added stop-all command
+  - `multiclaude stop-all` kills all tmux sessions and stops daemon
+  - `multiclaude stop-all --clean` also removes state files
+  - Gets repo list from daemon or state file
+  - Finds and kills all mc-* tmux sessions including orphans
+  - Committed: 8e10cb2
