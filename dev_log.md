@@ -172,3 +172,29 @@ Ready for Phase 3: Replace plain shells with Claude Code instances.
   - Applied to all agent types before Claude startup
   - Non-fatal warnings if config doesn't exist
   - Committed: 7549680
+- 2026-01-18 16:15 - ✅ Updated SPEC.md with Phase 3 progress
+  - Marked core Claude integration tasks complete
+  - Committed: 4c774a6
+
+**Phase 3 Summary:**
+Core Claude Code integration is COMPLETE! The system now:
+- Starts Claude instances in all agent tmux windows
+- Loads role-specific prompts (supervisor, worker, merge-queue)
+- Supports custom prompts from .multiclaude/ directory
+- Passes unique session IDs for persistence
+- Sends initial tasks to worker agents
+- Copies optional hooks configuration to worktrees
+- All 78 tests passing with MULTICLAUDE_TEST_MODE support
+
+**Commits in Phase 3:**
+1. f76458d - Add prompts package with default role-specific prompts
+2. ef4755e - Add Claude Code startup in tmux windows with session tracking
+3. 7549680 - Add hooks configuration support
+4. 4c774a6 - Mark Phase 3 core tasks complete in SPEC.md
+
+**Remaining work:**
+- Process health monitoring (daemon health check loop already exists, just needs PID tracking)
+- Crash recovery (restart Claude with same session ID)
+- Agent intelligence behaviors will be validated through actual use
+
+**Ready for manual end-to-end testing with real Claude instances!**
