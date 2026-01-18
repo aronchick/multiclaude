@@ -16,6 +16,8 @@ import (
 	"github.com/dlorenc/multiclaude/internal/names"
 	"github.com/dlorenc/multiclaude/internal/prompts"
 	"github.com/dlorenc/multiclaude/internal/socket"
+	"github.com/dlorenc/multiclaude/internal/state"
+	"github.com/dlorenc/multiclaude/internal/tmux"
 	"github.com/dlorenc/multiclaude/internal/worktree"
 	"github.com/dlorenc/multiclaude/pkg/config"
 )
@@ -170,6 +172,14 @@ func (c *CLI) registerCommands() {
 	}
 
 	c.rootCmd.Subcommands["daemon"] = daemonCmd
+
+	// Stop-all command (convenience for stopping everything)
+	c.rootCmd.Subcommands["stop-all"] = &Command{
+		Name:        "stop-all",
+		Description: "Stop daemon and kill all multiclaude tmux sessions",
+		Usage:       "multiclaude stop-all [--clean]",
+		Run:         c.stopAll,
+	}
 
 	// Repository commands
 	c.rootCmd.Subcommands["init"] = &Command{
@@ -365,6 +375,108 @@ func (c *CLI) daemonLogs(args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func (c *CLI) stopAll(args []string) error {
+	flags, _ := ParseFlags(args)
+	clean := flags["clean"] == "true"
+
+	fmt.Println("Stopping all multiclaude sessions...")
+
+	// Get list of repos (try daemon first, then state file)
+	var repos []string
+	client := socket.NewClient(c.paths.DaemonSock)
+	resp, err := client.Send(socket.Request{Command: "list_repos"})
+	if err == nil && resp.Success {
+		// Daemon is running, get repos from it
+		if repoList, ok := resp.Data.([]interface{}); ok {
+			for _, repo := range repoList {
+				if repoStr, ok := repo.(string); ok {
+					repos = append(repos, repoStr)
+				}
+			}
+		}
+	} else {
+		// Daemon not running, try to load from state file
+		st, err := state.Load(c.paths.StateFile)
+		if err == nil {
+			repos = st.ListRepos()
+		}
+	}
+
+	// Kill all multiclaude tmux sessions
+	tmuxClient := tmux.NewClient()
+	if tmuxClient.IsTmuxAvailable() {
+		for _, repo := range repos {
+			sessionName := fmt.Sprintf("mc-%s", repo)
+			exists, err := tmuxClient.HasSession(sessionName)
+			if err == nil && exists {
+				fmt.Printf("Killing tmux session: %s\n", sessionName)
+				if err := tmuxClient.KillSession(sessionName); err != nil {
+					fmt.Printf("Warning: failed to kill session %s: %v\n", sessionName, err)
+				}
+			}
+		}
+
+		// Also check for any mc-* sessions we might have missed
+		sessions, err := tmuxClient.ListSessions()
+		if err == nil {
+			for _, session := range sessions {
+				if strings.HasPrefix(session, "mc-") {
+					exists := false
+					for _, repo := range repos {
+						if fmt.Sprintf("mc-%s", repo) == session {
+							exists = true
+							break
+						}
+					}
+					if !exists {
+						fmt.Printf("Killing orphaned tmux session: %s\n", session)
+						if err := tmuxClient.KillSession(session); err != nil {
+							fmt.Printf("Warning: failed to kill session %s: %v\n", session, err)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Stop the daemon
+	fmt.Println("Stopping daemon...")
+	resp, err = client.Send(socket.Request{Command: "stop"})
+	if err != nil {
+		fmt.Printf("Daemon already stopped or not responding\n")
+	} else if resp.Success {
+		fmt.Println("Daemon stopped")
+	}
+
+	// Clean up state if requested
+	if clean {
+		fmt.Println("\nCleaning up state and data...")
+
+		// Remove state file
+		if err := os.Remove(c.paths.StateFile); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("Warning: failed to remove state file: %v\n", err)
+		} else {
+			fmt.Println("Removed state file")
+		}
+
+		// Remove PID file
+		if err := os.Remove(c.paths.DaemonPID); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("Warning: failed to remove PID file: %v\n", err)
+		}
+
+		// Remove socket file
+		if err := os.Remove(c.paths.DaemonSock); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("Warning: failed to remove socket file: %v\n", err)
+		}
+
+		fmt.Println("\nNote: Repositories, worktrees, and messages are preserved.")
+		fmt.Println("To remove everything, manually delete: ~/.multiclaude/")
+	}
+
+	fmt.Println("\n✓ All multiclaude sessions stopped")
+	return nil
 }
 
 func (c *CLI) initRepo(args []string) error {
