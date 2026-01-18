@@ -215,3 +215,8 @@ Core Claude Code integration is COMPLETE! The system now:
   - Agents were stuck on Claude's repo permission prompt
   - Added flag to allow autonomous operation in isolated worktrees
   - Committed: d7b5846
+- 2026-01-18 17:00 - ✅ Converted prompts to embedded markdown files
+  - Created supervisor.md, worker.md, merge-queue.md
+  - Used //go:embed for cleaner, maintainable prompt files
+  - Better syntax highlighting and version control
+  - Committed: 694f659

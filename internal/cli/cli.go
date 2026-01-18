@@ -561,17 +561,22 @@ func (c *CLI) initRepo(args []string) error {
 	}
 
 	// Start Claude in supervisor window (skip in test mode)
+	var supervisorPID, mergeQueuePID int
 	if os.Getenv("MULTICLAUDE_TEST_MODE") != "1" {
 		fmt.Println("Starting Claude Code in supervisor window...")
-		if err := c.startClaudeInTmux(tmuxSession, "supervisor", repoPath, supervisorSessionID, supervisorPromptFile, ""); err != nil {
+		pid, err := c.startClaudeInTmux(tmuxSession, "supervisor", repoPath, supervisorSessionID, supervisorPromptFile, "")
+		if err != nil {
 			return fmt.Errorf("failed to start supervisor Claude: %w", err)
 		}
+		supervisorPID = pid
 
 		// Start Claude in merge-queue window
 		fmt.Println("Starting Claude Code in merge-queue window...")
-		if err := c.startClaudeInTmux(tmuxSession, "merge-queue", repoPath, mergeQueueSessionID, mergeQueuePromptFile, ""); err != nil {
+		pid, err = c.startClaudeInTmux(tmuxSession, "merge-queue", repoPath, mergeQueueSessionID, mergeQueuePromptFile, "")
+		if err != nil {
 			return fmt.Errorf("failed to start merge-queue Claude: %w", err)
 		}
+		mergeQueuePID = pid
 	}
 
 	// Add repository to daemon state
@@ -600,6 +605,7 @@ func (c *CLI) initRepo(args []string) error {
 			"worktree_path": repoPath,
 			"tmux_window":   "supervisor",
 			"session_id":    supervisorSessionID,
+			"pid":           supervisorPID,
 		},
 	})
 	if err != nil {
@@ -619,6 +625,7 @@ func (c *CLI) initRepo(args []string) error {
 			"worktree_path": repoPath,
 			"tmux_window":   "merge-queue",
 			"session_id":    mergeQueueSessionID,
+			"pid":           mergeQueuePID,
 		},
 	})
 	if err != nil {
@@ -777,12 +784,15 @@ func (c *CLI) createWorker(args []string) error {
 	}
 
 	// Start Claude in worker window with initial task (skip in test mode)
+	var workerPID int
 	if os.Getenv("MULTICLAUDE_TEST_MODE") != "1" {
 		fmt.Println("Starting Claude Code in worker window...")
 		initialMessage := fmt.Sprintf("Task: %s", task)
-		if err := c.startClaudeInTmux(tmuxSession, workerName, wtPath, workerSessionID, workerPromptFile, initialMessage); err != nil {
+		pid, err := c.startClaudeInTmux(tmuxSession, workerName, wtPath, workerSessionID, workerPromptFile, initialMessage)
+		if err != nil {
 			return fmt.Errorf("failed to start worker Claude: %w", err)
 		}
+		workerPID = pid
 	}
 
 	// Register worker with daemon
@@ -796,6 +806,7 @@ func (c *CLI) createWorker(args []string) error {
 			"tmux_window":   workerName,
 			"task":          task,
 			"session_id":    workerSessionID,
+			"pid":           workerPID,
 		},
 	})
 	if err != nil {
@@ -1591,7 +1602,8 @@ func (c *CLI) copyHooksConfig(repoPath, worktreePath string) error {
 }
 
 // startClaudeInTmux starts Claude Code in a tmux window with the given configuration
-func (c *CLI) startClaudeInTmux(tmuxSession, tmuxWindow, workDir, sessionID, promptFile string, initialMessage string) error {
+// Returns the PID of the Claude process
+func (c *CLI) startClaudeInTmux(tmuxSession, tmuxWindow, workDir, sessionID, promptFile string, initialMessage string) (int, error) {
 	// Build Claude command
 	claudeCmd := fmt.Sprintf("claude --session-id %s --dangerously-skip-permissions", sessionID)
 
@@ -1604,19 +1616,31 @@ func (c *CLI) startClaudeInTmux(tmuxSession, tmuxWindow, workDir, sessionID, pro
 	target := fmt.Sprintf("%s:%s", tmuxSession, tmuxWindow)
 	cmd := exec.Command("tmux", "send-keys", "-t", target, claudeCmd, "C-m")
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to start Claude in tmux: %w", err)
+		return 0, fmt.Errorf("failed to start Claude in tmux: %w", err)
 	}
 
-	// If there's an initial message, send it after a brief delay
+	// Wait a moment for Claude to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Get the PID of the Claude process
+	tmuxClient := tmux.NewClient()
+	pid, err := tmuxClient.GetPanePID(tmuxSession, tmuxWindow)
+	if err != nil {
+		// Non-fatal - we'll just not have the PID
+		fmt.Printf("Warning: failed to get Claude PID: %v\n", err)
+		pid = 0
+	}
+
+	// If there's an initial message, send it after Claude is ready
 	if initialMessage != "" {
-		// Wait a moment for Claude to start
+		// Wait a bit more for Claude to fully initialize
 		time.Sleep(1 * time.Second)
 
 		cmd = exec.Command("tmux", "send-keys", "-t", target, initialMessage, "C-m")
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to send initial message to Claude: %w", err)
+			return pid, fmt.Errorf("failed to send initial message to Claude: %w", err)
 		}
 	}
 
-	return nil
+	return pid, nil
 }
