@@ -572,6 +572,10 @@ multiclaude daemon start  # alias
 # Stop daemon
 multiclaude daemon stop
 
+# Stop daemon and kill all tmux sessions
+multiclaude stop-all
+multiclaude stop-all --clean  # Also remove state files
+
 # Check status
 multiclaude daemon status
 
