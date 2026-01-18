@@ -155,3 +155,14 @@ Ready for Phase 3: Replace plain shells with Claude Code instances.
   - GetPrompt() combines default + custom prompts
   - All tests passing (9 tests)
   - Committed: f76458d
+- 2026-01-18 15:45 - ✅ Integrated Claude Code startup in tmux windows
+  - generateSessionID() for unique agent sessions
+  - writePromptFile() stores prompts in ~/.multiclaude/prompts/
+  - startClaudeInTmux() launches Claude with session ID and prompt
+  - initRepo() now starts Claude for supervisor and merge-queue
+  - createWorker() now starts Claude with initial task message
+  - Daemon accepts session_id from CLI instead of generating
+  - Added MULTICLAUDE_TEST_MODE env var to skip Claude in tests
+  - Fixed e2e test tmux session lifecycle
+  - All 78 tests passing
+  - Committed: ef4755e
