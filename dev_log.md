@@ -115,5 +115,21 @@ This allows testing the infrastructure independently before adding Claude comple
   - Registers workers with daemon
 - [x] Implement list repos command
   - `multiclaude list` - shows all tracked repositories
-- [ ] Implement agent message commands
+- [x] Implement agent message commands
+  - `multiclaude agent send-message <to> <msg>` - send message to another agent
+  - `multiclaude agent list-messages` - list all messages for current agent
+  - `multiclaude agent read-message <id>` - read and mark message as read
+  - `multiclaude agent ack-message <id>` - acknowledge a message
+  - Auto-infers agent context from current directory/tmux window
+  - Messages stored in filesystem under `~/.multiclaude/messages/<repo>/<agent>/`
 - [ ] Test end-to-end workflow
+
+**Phase 2 Status: Infrastructure Complete!**
+All core daemon and CLI infrastructure is implemented:
+- ✅ Daemon with health check, message routing, and wake loops
+- ✅ Repository initialization (clone, tmux session, supervisor/merge-queue agents)
+- ✅ Worker creation/management (worktrees, tmux windows, state tracking)
+- ✅ Agent messaging system (send, list, read, ack)
+- ✅ All communication via Unix socket to daemon
+
+Ready for Phase 3: Replace plain shells with Claude Code instances.

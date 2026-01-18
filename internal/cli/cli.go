@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dlorenc/multiclaude/internal/daemon"
+	"github.com/dlorenc/multiclaude/internal/messages"
 	"github.com/dlorenc/multiclaude/internal/socket"
 	"github.com/dlorenc/multiclaude/internal/worktree"
 	"github.com/dlorenc/multiclaude/pkg/config"
@@ -811,23 +814,203 @@ func (c *CLI) getReposList() []string {
 }
 
 func (c *CLI) sendMessage(args []string) error {
-	fmt.Println("Sending message... (not yet implemented)")
+	if len(args) < 2 {
+		return fmt.Errorf("usage: multiclaude agent send-message <to> <message>")
+	}
+
+	to := args[0]
+	body := strings.Join(args[1:], " ")
+
+	// Determine current agent and repo
+	repoName, agentName, err := c.inferAgentContext()
+	if err != nil {
+		return err
+	}
+
+	// Create message manager
+	msgMgr := messages.NewManager(c.paths.MessagesDir)
+
+	// Send message
+	msg, err := msgMgr.Send(repoName, agentName, to, body)
+	if err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
+	}
+
+	fmt.Printf("Message sent to %s (ID: %s)\n", to, msg.ID)
 	return nil
 }
 
 func (c *CLI) listMessages(args []string) error {
-	fmt.Println("Listing messages... (not yet implemented)")
+	// Determine current agent and repo
+	repoName, agentName, err := c.inferAgentContext()
+	if err != nil {
+		return err
+	}
+
+	msgMgr := messages.NewManager(c.paths.MessagesDir)
+
+	// List messages
+	msgs, err := msgMgr.List(repoName, agentName)
+	if err != nil {
+		return fmt.Errorf("failed to list messages: %w", err)
+	}
+
+	if len(msgs) == 0 {
+		fmt.Println("No messages")
+		return nil
+	}
+
+	fmt.Printf("Messages for %s (%d):\n", agentName, len(msgs))
+	for _, msg := range msgs {
+		status := msg.Status
+		if msg.Status == messages.StatusAcked && msg.AckedAt != nil {
+			status = messages.Status(fmt.Sprintf("acked (%s)", formatTime(*msg.AckedAt)))
+		}
+		fmt.Printf("  [%s] %s - From: %s - %s - %s\n",
+			msg.ID,
+			formatTime(msg.Timestamp),
+			msg.From,
+			status,
+			truncateString(msg.Body, 60))
+	}
+
 	return nil
 }
 
 func (c *CLI) readMessage(args []string) error {
-	fmt.Println("Reading message... (not yet implemented)")
+	if len(args) < 1 {
+		return fmt.Errorf("usage: multiclaude agent read-message <message-id>")
+	}
+
+	messageID := args[0]
+
+	// Determine current agent and repo
+	repoName, agentName, err := c.inferAgentContext()
+	if err != nil {
+		return err
+	}
+
+	msgMgr := messages.NewManager(c.paths.MessagesDir)
+
+	// Get message
+	msg, err := msgMgr.Get(repoName, agentName, messageID)
+	if err != nil {
+		return fmt.Errorf("failed to read message: %w", err)
+	}
+
+	// Update status to read
+	if msg.Status == messages.StatusPending || msg.Status == messages.StatusDelivered {
+		if err := msgMgr.UpdateStatus(repoName, agentName, messageID, messages.StatusRead); err != nil {
+			fmt.Printf("Warning: failed to update message status: %v\n", err)
+		}
+	}
+
+	// Display message
+	fmt.Printf("Message: %s\n", msg.ID)
+	fmt.Printf("From: %s\n", msg.From)
+	fmt.Printf("To: %s\n", msg.To)
+	fmt.Printf("Time: %s\n", msg.Timestamp.Format(time.RFC3339))
+	fmt.Printf("Status: %s\n", msg.Status)
+	if msg.AckedAt != nil {
+		fmt.Printf("Acked: %s\n", msg.AckedAt.Format(time.RFC3339))
+	}
+	fmt.Println()
+	fmt.Println(msg.Body)
+
 	return nil
 }
 
 func (c *CLI) ackMessage(args []string) error {
-	fmt.Println("Acknowledging message... (not yet implemented)")
+	if len(args) < 1 {
+		return fmt.Errorf("usage: multiclaude agent ack-message <message-id>")
+	}
+
+	messageID := args[0]
+
+	// Determine current agent and repo
+	repoName, agentName, err := c.inferAgentContext()
+	if err != nil {
+		return err
+	}
+
+	msgMgr := messages.NewManager(c.paths.MessagesDir)
+
+	// Ack message
+	if err := msgMgr.Ack(repoName, agentName, messageID); err != nil {
+		return fmt.Errorf("failed to acknowledge message: %w", err)
+	}
+
+	fmt.Printf("Message %s acknowledged\n", messageID)
 	return nil
+}
+
+// inferAgentContext infers the current agent and repo from working directory
+func (c *CLI) inferAgentContext() (repoName, agentName string, err error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Check if we're in a worktree path
+	// Path format: ~/.multiclaude/wts/<repo>/<agent>
+	if strings.Contains(cwd, c.paths.WorktreesDir) {
+		// Extract repo and agent from path
+		rel, err := filepath.Rel(c.paths.WorktreesDir, cwd)
+		if err == nil {
+			parts := strings.SplitN(rel, string(filepath.Separator), 2)
+			if len(parts) >= 2 {
+				return parts[0], parts[1], nil
+			}
+			if len(parts) == 1 {
+				// We're in the repo worktree dir itself
+				return parts[0], "", fmt.Errorf("cannot determine agent - in repo worktree directory")
+			}
+		}
+	}
+
+	// Check if we're in a main repo path
+	// Path format: ~/.multiclaude/repos/<repo>
+	if strings.Contains(cwd, c.paths.ReposDir) {
+		rel, err := filepath.Rel(c.paths.ReposDir, cwd)
+		if err == nil {
+			parts := strings.SplitN(rel, string(filepath.Separator), 2)
+			if len(parts) >= 1 {
+				// In main repo - could be supervisor or merge-queue
+				// Try to get tmux window name
+				tmuxWindow := os.Getenv("TMUX_PANE")
+				if tmuxWindow != "" {
+					// Get window name from tmux
+					cmd := exec.Command("tmux", "display-message", "-p", "#{window_name}")
+					output, err := cmd.Output()
+					if err == nil {
+						windowName := strings.TrimSpace(string(output))
+						return parts[0], windowName, nil
+					}
+				}
+
+				// Fallback: assume supervisor
+				return parts[0], "supervisor", nil
+			}
+		}
+	}
+
+	return "", "", fmt.Errorf("not in a multiclaude agent directory. Run this command from within a tmux window")
+}
+
+// Helper functions
+
+func formatTime(t time.Time) string {
+	if time.Since(t) < 24*time.Hour {
+		return t.Format("15:04:05")
+	}
+	return t.Format("Jan 02 15:04")
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 func (c *CLI) completeWorker(args []string) error {
