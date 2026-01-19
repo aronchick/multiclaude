@@ -1462,17 +1462,10 @@ func (c *CLI) createWorker(args []string) error {
 func (c *CLI) listWorkers(args []string) error {
 	flags, _ := ParseFlags(args)
 
-	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer repo from current working directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	// Determine repository (from flag, CWD inference, or interactive selection)
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return err
 	}
 
 	client := socket.NewClient(c.paths.DaemonSock)
@@ -1598,18 +1591,11 @@ func (c *CLI) removeWorker(args []string) error {
 
 	workerName := args[0]
 
-	// Determine repository
+	// Determine repository (from flag, CWD inference, or interactive selection)
 	flags, _ := ParseFlags(args[1:])
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer repo from current working directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("Removing worker '%s' from repo '%s'\n", workerName, repoName)
@@ -1757,17 +1743,10 @@ func (c *CLI) addWorkspace(args []string) error {
 		return err
 	}
 
-	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer from current directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	// Determine repository (from flag, CWD inference, or interactive selection)
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return err
 	}
 
 	// Determine branch to start from
@@ -1900,18 +1879,11 @@ func (c *CLI) removeWorkspace(args []string) error {
 
 	workspaceName := args[0]
 
-	// Determine repository
+	// Determine repository (from flag, CWD inference, or interactive selection)
 	flags, _ := ParseFlags(args[1:])
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer repo from current working directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("Removing workspace '%s' from repo '%s'\n", workspaceName, repoName)
@@ -2032,17 +2004,10 @@ func (c *CLI) removeWorkspace(args []string) error {
 func (c *CLI) listWorkspaces(args []string) error {
 	flags, _ := ParseFlags(args)
 
-	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer repo from current working directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	// Determine repository (from flag, CWD inference, or interactive selection)
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return err
 	}
 
 	client := socket.NewClient(c.paths.DaemonSock)
@@ -2124,24 +2089,25 @@ func (c *CLI) listWorkspaces(args []string) error {
 
 // connectWorkspace attaches to a workspace
 func (c *CLI) connectWorkspace(args []string) error {
-	if len(args) < 1 {
-		return errors.InvalidUsage("usage: multiclaude workspace connect <name>")
+	flags, posArgs := ParseFlags(args)
+
+	// Determine repository (from flag, CWD inference, or interactive selection)
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return err
 	}
 
-	workspaceName := args[0]
-	flags, _ := ParseFlags(args[1:])
-
-	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
+	// Determine workspace name (from arg or interactive selection)
+	var workspaceName string
+	if len(posArgs) > 0 {
+		workspaceName = posArgs[0]
 	} else {
-		// Try to infer repo from current working directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
+		// Prompt for workspace selection
+		selected, err := c.selectWorkspace(repoName)
+		if err != nil {
+			return err
 		}
+		workspaceName = selected
 	}
 
 	// Get workspace info
@@ -3013,17 +2979,10 @@ func (c *CLI) attachAgent(args []string) error {
 	flags, _ := ParseFlags(args[1:])
 	readOnly := flags["read-only"] == "true" || flags["r"] == "true"
 
-	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer repo from current working directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	// Determine repository (from flag, CWD inference, or interactive selection)
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return err
 	}
 
 	// Get agent info to find tmux session and window
