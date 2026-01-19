@@ -676,7 +676,7 @@ func (c *CLI) initRepo(args []string) error {
 		return errors.InvalidUsage("usage: multiclaude init <github-url> [name] [--no-merge-queue] [--mq-track=all|author|assigned]")
 	}
 
-	githubURL := posArgs[0]
+	githubURL := strings.TrimRight(posArgs[0], "/")
 
 	// Parse repository name from URL if not provided
 	var repoName string
@@ -686,6 +686,11 @@ func (c *CLI) initRepo(args []string) error {
 		// Extract repo name from URL (e.g., github.com/user/repo -> repo)
 		parts := strings.Split(githubURL, "/")
 		repoName = strings.TrimSuffix(parts[len(parts)-1], ".git")
+	}
+
+	// Validate repository name before any operations
+	if repoName == "" {
+		return errors.InvalidUsage("could not determine repository name from URL; please provide a name: multiclaude init <url> <name>")
 	}
 
 	// Parse merge queue configuration flags
@@ -737,6 +742,9 @@ func (c *CLI) initRepo(args []string) error {
 
 	// Create tmux session
 	tmuxSession := fmt.Sprintf("mc-%s", repoName)
+	if tmuxSession == "mc-" {
+		return fmt.Errorf("invalid tmux session name: repository name cannot be empty")
+	}
 
 	fmt.Printf("Creating tmux session: %s\n", tmuxSession)
 
@@ -2712,26 +2720,16 @@ func (c *CLI) reviewPR(args []string) error {
 	// Get repository path
 	repoPath := c.paths.RepoDir(repoName)
 
-	// Get the PR branch name using gh CLI
-	fmt.Printf("Fetching PR branch information...\n")
-	cmd := exec.Command("gh", "pr", "view", prNumber, "--repo", fmt.Sprintf("%s/%s", parts[1], parts[2]), "--json", "headRefName", "-q", ".headRefName")
+	// Fetch the PR using GitHub's PR refs - this works for both same-repo and fork PRs
+	// The refs/pull/<number>/head ref always exists and points to the PR's head commit
+	fmt.Printf("Fetching PR #%s...\n", prNumber)
+	prRef := fmt.Sprintf("refs/pull/%s/head", prNumber)
+	localRef := fmt.Sprintf("refs/multiclaude/pr-%s", prNumber)
+	cmd := exec.Command("git", "fetch", "origin", fmt.Sprintf("%s:%s", prRef, localRef))
 	cmd.Dir = repoPath
-	branchOutput, err := cmd.Output()
-	if err != nil {
-		return errors.Wrap(errors.CategoryRuntime, "failed to get PR branch info", err).WithSuggestion("ensure 'gh' CLI is installed and authenticated: gh auth login")
-	}
-	prBranch := strings.TrimSpace(string(branchOutput))
-	if prBranch == "" {
-		return errors.New(errors.CategoryRuntime, "could not determine PR branch name - the PR may not exist or be accessible")
-	}
-
-	fmt.Printf("PR branch: %s\n", prBranch)
-
-	// Fetch the PR branch
-	cmd = exec.Command("git", "fetch", "origin", prBranch)
-	cmd.Dir = repoPath
-	if err := cmd.Run(); err != nil {
-		return errors.GitOperationFailed("fetch", err)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return errors.Wrap(errors.CategoryRuntime, fmt.Sprintf("failed to fetch PR #%s: %s", prNumber, strings.TrimSpace(string(output))), err).
+			WithSuggestion("ensure the PR exists and you have access to the repository")
 	}
 
 	// Create worktree for review
@@ -2740,7 +2738,7 @@ func (c *CLI) reviewPR(args []string) error {
 	reviewBranch := fmt.Sprintf("review/%s", reviewerName)
 
 	fmt.Printf("Creating worktree at: %s\n", wtPath)
-	if err := wt.CreateNewBranch(wtPath, reviewBranch, fmt.Sprintf("origin/%s", prBranch)); err != nil {
+	if err := wt.CreateNewBranch(wtPath, reviewBranch, localRef); err != nil {
 		return fmt.Errorf("failed to create worktree: %w", err)
 	}
 
