@@ -2137,3 +2137,52 @@ func TestCLIRepoRmNonexistent(t *testing.T) {
 		t.Error("removing nonexistent repo should fail")
 	}
 }
+
+func TestInitRejectsEmptyRepoName(t *testing.T) {
+	tests := []struct {
+		name        string
+		url         string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:    "normal URL parses name correctly",
+			url:     "https://github.com/user/repo",
+			wantErr: false,
+		},
+		{
+			name:    "URL with trailing slash parses name correctly",
+			url:     "https://github.com/user/repo/",
+			wantErr: false,
+		},
+		{
+			name:        "URL with only slashes fails",
+			url:         "///",
+			wantErr:     true,
+			errContains: "could not determine repository name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cli, _, cleanup := setupTestEnvironment(t)
+			defer cleanup()
+
+			err := cli.Execute([]string{"init", tt.url})
+
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error but got none")
+				} else if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
+				}
+			} else {
+				// For valid URLs, we expect the error to be about something other than the name
+				// (e.g., git clone failing because the repo doesn't exist)
+				if err != nil && strings.Contains(err.Error(), "could not determine repository name") {
+					t.Errorf("unexpected name parsing error: %v", err)
+				}
+			}
+		})
+	}
+}

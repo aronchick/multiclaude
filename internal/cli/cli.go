@@ -652,7 +652,7 @@ func (c *CLI) initRepo(args []string) error {
 		return errors.InvalidUsage("usage: multiclaude init <github-url> [name] [--no-merge-queue] [--mq-track=all|author|assigned]")
 	}
 
-	githubURL := posArgs[0]
+	githubURL := strings.TrimRight(posArgs[0], "/")
 
 	// Parse repository name from URL if not provided
 	var repoName string
@@ -662,6 +662,11 @@ func (c *CLI) initRepo(args []string) error {
 		// Extract repo name from URL (e.g., github.com/user/repo -> repo)
 		parts := strings.Split(githubURL, "/")
 		repoName = strings.TrimSuffix(parts[len(parts)-1], ".git")
+	}
+
+	// Validate repository name before any operations
+	if repoName == "" {
+		return errors.InvalidUsage("could not determine repository name from URL; please provide a name: multiclaude init <url> <name>")
 	}
 
 	// Parse merge queue configuration flags
@@ -713,6 +718,9 @@ func (c *CLI) initRepo(args []string) error {
 
 	// Create tmux session
 	tmuxSession := fmt.Sprintf("mc-%s", repoName)
+	if tmuxSession == "mc-" {
+		return fmt.Errorf("invalid tmux session name: repository name cannot be empty")
+	}
 
 	fmt.Printf("Creating tmux session: %s\n", tmuxSession)
 
