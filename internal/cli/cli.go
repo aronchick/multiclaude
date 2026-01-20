@@ -1858,8 +1858,28 @@ func (c *CLI) showHistory(args []string) error {
 		return nil
 	}
 
-	// Query GitHub for PR status for each task with a branch
+	// Collect branches and existing PR URLs to batch-fetch PR statuses
 	repoPath := c.paths.RepoDir(repoName)
+	var branches []string
+	existingPRURLs := make(map[string]string) // branch -> existing PR URL
+
+	for _, item := range history {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		branch, _ := entry["branch"].(string)
+		prURL, _ := entry["pr_url"].(string)
+		if branch != "" {
+			branches = append(branches, branch)
+			if prURL != "" {
+				existingPRURLs[branch] = prURL
+			}
+		}
+	}
+
+	// Batch fetch all PR statuses with a single GitHub API call
+	prStatuses := c.batchFetchPRStatuses(repoPath, branches, existingPRURLs)
 
 	format.Header("Task History for '%s' (last %d):", repoName, len(history))
 	fmt.Println()
@@ -1874,11 +1894,13 @@ func (c *CLI) showHistory(args []string) error {
 		name, _ := entry["name"].(string)
 		task, _ := entry["task"].(string)
 		branch, _ := entry["branch"].(string)
-		prURL, _ := entry["pr_url"].(string)
 		completedAt, _ := entry["completed_at"].(string)
 
-		// Try to get PR status from GitHub if we have a branch
-		prStatus, prLink := c.getPRStatusForBranch(repoPath, branch, prURL)
+		// Look up PR status from batch-fetched results
+		prStatus, prLink := "no-pr", ""
+		if info, ok := prStatuses[branch]; ok {
+			prStatus, prLink = info.status, info.link
+		}
 
 		// Format status with color
 		var statusCell format.ColoredCell
@@ -1924,55 +1946,85 @@ func (c *CLI) showHistory(args []string) error {
 	return nil
 }
 
-// getPRStatusForBranch queries GitHub for the PR status of a branch
-func (c *CLI) getPRStatusForBranch(repoPath, branch, existingPRURL string) (status, prLink string) {
-	// If we already have a PR URL, just return it formatted
-	if existingPRURL != "" {
-		// Extract PR number from URL for shorter display
-		parts := strings.Split(existingPRURL, "/")
-		if len(parts) > 0 {
-			prNum := parts[len(parts)-1]
-			return "unknown", "#" + prNum
+// prStatusInfo holds PR status information for a branch
+type prStatusInfo struct {
+	status string
+	link   string
+}
+
+// batchFetchPRStatuses fetches PR statuses for multiple branches in a single GitHub API call
+func (c *CLI) batchFetchPRStatuses(repoPath string, branches []string, existingPRURLs map[string]string) map[string]prStatusInfo {
+	result := make(map[string]prStatusInfo)
+
+	if len(branches) == 0 {
+		return result
+	}
+
+	// Handle branches that already have existing PR URLs
+	branchesNeedingLookup := make([]string, 0, len(branches))
+	for _, branch := range branches {
+		if existingURL, ok := existingPRURLs[branch]; ok {
+			// Extract PR number from URL for shorter display
+			parts := strings.Split(existingURL, "/")
+			if len(parts) > 0 {
+				prNum := parts[len(parts)-1]
+				result[branch] = prStatusInfo{status: "unknown", link: "#" + prNum}
+			} else {
+				result[branch] = prStatusInfo{status: "unknown", link: existingURL}
+			}
+		} else {
+			branchesNeedingLookup = append(branchesNeedingLookup, branch)
 		}
-		return "unknown", existingPRURL
 	}
 
-	// If no branch, nothing to query
-	if branch == "" {
-		return "no-pr", ""
+	if len(branchesNeedingLookup) == 0 {
+		return result
 	}
 
-	// Query GitHub for PR associated with this branch using gh CLI
-	cmd := exec.Command("gh", "pr", "list", "--head", branch, "--state", "all", "--json", "number,state,url", "--limit", "1")
+	// Build a set of branches we're looking for (for fast lookup)
+	branchSet := make(map[string]bool)
+	for _, b := range branchesNeedingLookup {
+		branchSet[b] = true
+	}
+
+	// Fetch all PRs in a single call - include headRefName to match by branch
+	cmd := exec.Command("gh", "pr", "list", "--state", "all", "--json", "number,state,headRefName", "--limit", "100")
 	cmd.Dir = repoPath
 	output, err := cmd.Output()
 	if err != nil {
-		return "no-pr", ""
+		return result
 	}
 
 	// Parse JSON output
 	var prs []struct {
-		Number int    `json:"number"`
-		State  string `json:"state"`
-		URL    string `json:"url"`
+		Number      int    `json:"number"`
+		State       string `json:"state"`
+		HeadRefName string `json:"headRefName"`
 	}
-	if err := json.Unmarshal(output, &prs); err != nil || len(prs) == 0 {
-		return "no-pr", ""
+	if err := json.Unmarshal(output, &prs); err != nil {
+		return result
 	}
 
-	pr := prs[0]
-	prLink = fmt.Sprintf("#%d", pr.Number)
-
-	switch strings.ToLower(pr.State) {
-	case "merged":
-		return "merged", prLink
-	case "open":
-		return "open", prLink
-	case "closed":
-		return "closed", prLink
-	default:
-		return "unknown", prLink
+	// Build map of branch -> PR info
+	for _, pr := range prs {
+		if branchSet[pr.HeadRefName] {
+			link := fmt.Sprintf("#%d", pr.Number)
+			var status string
+			switch strings.ToLower(pr.State) {
+			case "merged":
+				status = "merged"
+			case "open":
+				status = "open"
+			case "closed":
+				status = "closed"
+			default:
+				status = "unknown"
+			}
+			result[pr.HeadRefName] = prStatusInfo{status: status, link: link}
+		}
 	}
+
+	return result
 }
 
 func (c *CLI) removeWorker(args []string) error {
