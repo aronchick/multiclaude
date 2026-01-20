@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/dlorenc/multiclaude/internal/prompts/commands"
 	"github.com/dlorenc/multiclaude/internal/socket"
 	"github.com/dlorenc/multiclaude/internal/state"
+	"github.com/dlorenc/multiclaude/internal/update"
 	"github.com/dlorenc/multiclaude/internal/worktree"
 	"github.com/dlorenc/multiclaude/pkg/claude"
 	"github.com/dlorenc/multiclaude/pkg/config"
@@ -561,7 +563,7 @@ func (c *CLI) startDaemon(args []string) error {
 }
 
 func (c *CLI) runDaemon(args []string) error {
-	return daemon.Run()
+	return daemon.Run(Version)
 }
 
 func (c *CLI) stopDaemon(args []string) error {
@@ -4564,5 +4566,267 @@ func (c *CLI) bugReport(args []string) error {
 
 	// Print to stdout
 	fmt.Print(markdown)
+	return nil
+}
+
+// linkGlobalCredentials creates a symlink from the worktree's .claude/.credentials.json
+// to the global ~/.claude/.credentials.json. This ensures workers can access OAuth
+// credentials without duplicating sensitive files.
+func (c *CLI) linkGlobalCredentials(worktreePath string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	globalCredFile := filepath.Join(home, ".claude", ".credentials.json")
+	localClaudeDir := filepath.Join(worktreePath, ".claude")
+	localCredFile := filepath.Join(localClaudeDir, ".credentials.json")
+
+	// Check if global credentials exist
+	if _, err := os.Stat(globalCredFile); os.IsNotExist(err) {
+		// No global credentials - user might be using API key
+		return nil
+	}
+
+	// Check if symlink already exists and is valid
+	if linkTarget, err := os.Readlink(localCredFile); err == nil {
+		if linkTarget == globalCredFile {
+			// Already correctly linked
+			return nil
+		}
+		// Invalid link, remove it
+		os.Remove(localCredFile)
+	} else if _, err := os.Stat(localCredFile); err == nil {
+		// File exists but is not a symlink, remove it
+		os.Remove(localCredFile)
+	}
+
+	// Create symlink
+	if err := os.Symlink(globalCredFile, localCredFile); err != nil {
+		return fmt.Errorf("failed to create credentials symlink: %w", err)
+	}
+
+	return nil
+}
+
+// repairCredentials fixes worktrees that are missing credential symlinks
+func (c *CLI) repairCredentials(verbose bool) (int, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	globalCredFile := filepath.Join(home, ".claude", ".credentials.json")
+
+	// Check if global credentials exist
+	if _, err := os.Stat(globalCredFile); os.IsNotExist(err) {
+		if verbose {
+			fmt.Println("  No global credentials found - skipping credential repair")
+		}
+		return 0, nil
+	}
+
+	// Load state to get all repos
+	st, err := state.Load(c.paths.StateFile)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load state: %w", err)
+	}
+
+	fixed := 0
+	for _, repoName := range st.ListRepos() {
+		wtRootDir := c.paths.WorktreeDir(repoName)
+
+		// Skip if worktree directory doesn't exist
+		if _, err := os.Stat(wtRootDir); os.IsNotExist(err) {
+			continue
+		}
+
+		// Walk all worktrees
+		entries, err := os.ReadDir(wtRootDir)
+		if err != nil {
+			if verbose {
+				fmt.Printf("  Warning: failed to read worktree dir for %s: %v\n", repoName, err)
+			}
+			continue
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			worktreePath := filepath.Join(wtRootDir, entry.Name())
+			claudeDir := filepath.Join(worktreePath, ".claude")
+
+			// Skip if .claude doesn't exist
+			if _, err := os.Stat(claudeDir); os.IsNotExist(err) {
+				continue
+			}
+
+			localCredFile := filepath.Join(claudeDir, ".credentials.json")
+
+			// Check if credentials already exist and are a valid symlink
+			if linkTarget, err := os.Readlink(localCredFile); err == nil {
+				if linkTarget == globalCredFile {
+					// Already correctly linked
+					continue
+				}
+				// Invalid symlink, will be recreated below
+			} else if _, err := os.Stat(localCredFile); err == nil {
+				// File exists but is not a symlink, remove it
+				if verbose {
+					fmt.Printf("  Removing non-symlink credential file in %s/%s\n", repoName, entry.Name())
+				}
+				os.Remove(localCredFile)
+			} else if !os.IsNotExist(err) {
+				// Some other error
+				if verbose {
+					fmt.Printf("  Warning: failed to check credentials in %s/%s: %v\n", repoName, entry.Name(), err)
+				}
+				continue
+			}
+
+			// Create or recreate symlink
+			if err := os.Symlink(globalCredFile, localCredFile); err != nil {
+				if verbose {
+					fmt.Printf("  Warning: failed to link credentials in %s/%s: %v\n", repoName, entry.Name(), err)
+				}
+			} else {
+				if verbose {
+					fmt.Printf("  Linked credentials in %s/%s\n", repoName, entry.Name())
+				}
+				fixed++
+			}
+		}
+	}
+
+	return fixed, nil
+}
+// updateCommand handles the 'multiclaude update' command
+func (c *CLI) updateCommand(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	// Check for check-only mode
+	checkOnly := flags["check"] == "true"
+	skipConfirm := flags["yes"] == "true" || flags["y"] == "true"
+	noRestart := flags["no-restart"] == "true"
+	force := flags["force"] == "true"
+
+	fmt.Println("Checking for updates...")
+
+	// Check for updates
+	checker := update.NewChecker(Version)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := checker.CheckWithFallback(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to check for updates: %w", err)
+	}
+
+	fmt.Printf("Current version: %s\n", Version)
+	if result.LatestVersion != "" {
+		fmt.Printf("Latest version:  %s\n", result.LatestVersion)
+	}
+
+	if !result.UpdateAvailable && !force {
+		if Version == "dev" {
+			fmt.Println("\nYou are running a development version.")
+			if result.LatestVersion != "" {
+				fmt.Printf("Latest release is %s\n", result.LatestVersion)
+			}
+		} else {
+			fmt.Println("\nYou are already running the latest version.")
+		}
+		return nil
+	}
+
+	if checkOnly {
+		if result.UpdateAvailable {
+			fmt.Printf("\nAn update is available: %s -> %s\n", Version, result.LatestVersion)
+			fmt.Println("Run 'multiclaude update' to install it.")
+		}
+		return nil
+	}
+
+	// Check if we can update
+	updater := update.NewUpdater()
+	canUpdate, reason := updater.CanUpdate()
+	if !canUpdate {
+		return fmt.Errorf("cannot update: %s\n\nPlease update using your installation method (e.g., 'go install github.com/dlorenc/multiclaude/cmd/multiclaude@latest')", reason)
+	}
+
+	// Confirm update
+	if !skipConfirm {
+		fmt.Printf("\nAn update is available (%s -> %s). Proceed? [Y/n] ", Version, result.LatestVersion)
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("failed to read response: %w", err)
+		}
+		response = strings.TrimSpace(strings.ToLower(response))
+		if response != "" && response != "y" && response != "yes" {
+			fmt.Println("Update cancelled.")
+			return nil
+		}
+	}
+
+	// Check if daemon is running
+	daemonWasRunning := false
+	pidFile := daemon.NewPIDFile(c.paths.DaemonPID)
+	if running, _, _ := pidFile.IsRunning(); running {
+		daemonWasRunning = true
+		fmt.Println("\nStopping daemon...")
+
+		client := socket.NewClient(c.paths.DaemonSock)
+		resp, err := client.Send(socket.Request{Command: "stop"})
+		if err != nil {
+			return fmt.Errorf("failed to stop daemon: %w", err)
+		}
+		if !resp.Success {
+			return fmt.Errorf("failed to stop daemon: %s", resp.Error)
+		}
+
+		// Wait for daemon to stop
+		for i := 0; i < 30; i++ {
+			if running, _, _ := pidFile.IsRunning(); !running {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		fmt.Println("Daemon stopped.")
+	}
+
+	// Install the update
+	fmt.Printf("\nInstalling multiclaude %s...\n", result.LatestVersion)
+
+	updateResult, err := updater.Update(context.Background())
+	if err != nil {
+		// If update fails and daemon was running, try to restart it
+		if daemonWasRunning {
+			fmt.Println("\nUpdate failed, attempting to restart daemon with current version...")
+			daemon.RunDetached()
+		}
+		return fmt.Errorf("failed to install update: %w", err)
+	}
+
+	if !updateResult.Success {
+		return fmt.Errorf("update failed: %v", updateResult.Error)
+	}
+
+	fmt.Printf("Successfully installed new version at %s\n", updateResult.BinaryPath)
+
+	// Restart daemon if it was running (unless --no-restart)
+	if daemonWasRunning && !noRestart {
+		fmt.Println("\nRestarting daemon...")
+		if err := daemon.RunDetached(); err != nil {
+			return fmt.Errorf("failed to restart daemon: %w\n\nYou can manually start it with: multiclaude start", err)
+		}
+		fmt.Println("Daemon started successfully.")
+	} else if daemonWasRunning && noRestart {
+		fmt.Println("\nDaemon was stopped for update. Run 'multiclaude start' to restart it.")
+	}
+
+	fmt.Printf("\nUpdate complete! You are now running multiclaude %s\n", result.LatestVersion)
 	return nil
 }
