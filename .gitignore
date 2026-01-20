@@ -31,3 +31,5 @@ Thumbs.db
 # multiclaude runtime (but allow config files)
 .multiclaude/*
 !.multiclaude/*.md
+!.multiclaude/hooks.json
+!.multiclaude/scripts/
