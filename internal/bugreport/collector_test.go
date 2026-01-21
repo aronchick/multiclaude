@@ -30,7 +30,6 @@ func TestCollector_Collect(t *testing.T) {
 		WorktreesDir:    filepath.Join(tmpDir, "wts"),
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
-		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
 	}
 
 	// Create a test state file
@@ -122,7 +121,6 @@ func TestCollector_CollectVerbose(t *testing.T) {
 		WorktreesDir:    filepath.Join(tmpDir, "wts"),
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
-		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
 	}
 
 	// Create a test state file with multiple repos

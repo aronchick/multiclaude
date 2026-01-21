@@ -53,7 +53,6 @@ func setupIntegrationTest(t *testing.T, repoName string) (*cli.CLI, *daemon.Daem
 		WorktreesDir:    filepath.Join(tmpDir, "wts"),
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
-		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
 	}
 
 	if err := paths.EnsureDirectories(); err != nil {
@@ -280,7 +279,6 @@ func TestRepoInitializationIntegration(t *testing.T) {
 		WorktreesDir:    filepath.Join(tmpDir, "wts"),
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
-		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
 	}
 
 	if err := paths.EnsureDirectories(); err != nil {
@@ -441,7 +439,6 @@ func TestRepoInitializationWithMergeQueueDisabled(t *testing.T) {
 		WorktreesDir:    filepath.Join(tmpDir, "wts"),
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
-		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
 	}
 
 	if err := paths.EnsureDirectories(); err != nil {

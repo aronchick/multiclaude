@@ -37,7 +37,6 @@ func setupTestDaemon(t *testing.T) (*Daemon, func()) {
 		WorktreesDir:    filepath.Join(tmpDir, "wts"),
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
-		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
 	}
 
 	// Create directories

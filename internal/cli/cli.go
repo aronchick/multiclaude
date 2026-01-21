@@ -19,7 +19,6 @@ import (
 	"github.com/dlorenc/multiclaude/internal/messages"
 	"github.com/dlorenc/multiclaude/internal/names"
 	"github.com/dlorenc/multiclaude/internal/prompts"
-	"github.com/dlorenc/multiclaude/internal/prompts/commands"
 	"github.com/dlorenc/multiclaude/internal/socket"
 	"github.com/dlorenc/multiclaude/internal/state"
 	"github.com/dlorenc/multiclaude/internal/worktree"
@@ -4450,16 +4449,8 @@ func (c *CLI) setupOutputCapture(tmuxSession, tmuxWindow, repoName, agentName, a
 // startClaudeInTmux starts Claude Code in a tmux window with the given configuration
 // Returns the PID of the Claude process
 func (c *CLI) startClaudeInTmux(binaryPath, tmuxSession, tmuxWindow, workDir, sessionID, promptFile, repoName string, initialMessage string) (int, error) {
-	// Set up per-agent Claude config directory with slash commands
-	agentConfigDir := c.paths.AgentClaudeConfigDir(repoName, tmuxWindow)
-	if err := commands.SetupAgentCommands(agentConfigDir); err != nil {
-		// Log warning but don't fail - slash commands are a nice-to-have
-		fmt.Printf("Warning: failed to setup agent commands: %v\n", err)
-	}
-
 	// Build Claude command using the full path to prevent version drift
-	// Set CLAUDE_CONFIG_DIR to inject per-agent slash commands
-	claudeCmd := fmt.Sprintf("CLAUDE_CONFIG_DIR=%s %s --session-id %s --dangerously-skip-permissions", agentConfigDir, binaryPath, sessionID)
+	claudeCmd := fmt.Sprintf("%s --session-id %s --dangerously-skip-permissions", binaryPath, sessionID)
 
 	// Add prompt file if provided
 	if promptFile != "" {

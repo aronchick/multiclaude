@@ -86,7 +86,7 @@ MULTICLAUDE_TEST_MODE=1 go test ./test/...  # Skip Claude startup
 
 1. **CLI** parses args → sends `Request` via Unix socket
 2. **Daemon** handles request → updates `state.json` → manages tmux
-3. **Agents** run in tmux windows with embedded prompts and per-agent slash commands (via `CLAUDE_CONFIG_DIR`)
+3. **Agents** run in tmux windows with embedded prompts
 4. **Messages** flow via filesystem JSON files, routed by daemon
 5. **Health checks** (every 2 min) attempt self-healing restoration before cleanup of dead agents
 
@@ -224,10 +224,8 @@ When modifying daemon loops:
 ├── repos/<repo>/           # Cloned repositories
 ├── wts/<repo>/<agent>/     # Git worktrees (one per agent)
 ├── messages/<repo>/<agent>/ # Message JSON files
-├── output/<repo>/          # Agent output logs
-│   └── workers/            # Worker-specific logs
-└── claude-config/<repo>/<agent>/ # Per-agent CLAUDE_CONFIG_DIR
-    └── commands/           # Slash command files (*.md)
+└── output/<repo>/          # Agent output logs
+    └── workers/            # Worker-specific logs
 ```
 
 ## Common Operations
