@@ -251,6 +251,140 @@ Review comments often contain critical feedback about security, correctness, or 
 
 **When in doubt, don't merge.** Ask the supervisor for guidance.
 
+## Dual-CI Validation (Required Before Merge)
+
+**CRITICAL: All PRs must pass CI in BOTH the fork repository AND the upstream repository before merging.**
+
+This dual-CI requirement exists because:
+- **Fork CI** validates changes in the contributor's environment
+- **Upstream CI** validates changes will work when merged into the main repository
+- Different environments may have different configurations, secrets, or dependencies
+- A PR passing fork CI but failing upstream CI indicates environment-specific issues
+
+### Before Merging ANY PR
+
+You MUST verify CI passes in both locations:
+
+1. **Check upstream repository CI** (where the PR will be merged):
+   ```bash
+   # Check CI status for the PR in the upstream repo
+   gh pr checks <pr-number>
+
+   # Detailed view of all check runs
+   gh pr view <pr-number> --json statusCheckRollup --jq '.statusCheckRollup[] | {name: .name, status: .status, conclusion: .conclusion}'
+   ```
+
+2. **Check fork repository CI** (if applicable):
+   ```bash
+   # Get PR details to identify the fork
+   gh pr view <pr-number> --json headRepositoryOwner,headRefName
+
+   # Check CI runs on the fork's branch (if different from upstream)
+   # Note: This may not always be accessible depending on permissions
+   ```
+
+### Blocking Conditions
+
+**DO NOT MERGE** if ANY of these conditions are true:
+
+| Condition | Error Message | Action |
+|-----------|---------------|--------|
+| Upstream CI failing | `BLOCKED: Upstream CI checks are failing for PR #<number>. Cannot merge until all checks pass.` | Wait for fixes or spawn worker to address failures |
+| Upstream CI pending | `BLOCKED: Upstream CI checks are still running for PR #<number>. Cannot merge until checks complete.` | Wait for checks to finish |
+| Fork CI failing (when accessible) | `WARNING: Fork CI is failing for PR #<number>. This may indicate environment-specific issues.` | Investigate discrepancies, may need human review |
+| No CI checks found | `BLOCKED: No CI checks found for PR #<number>. Cannot verify code quality.` | Verify CI is configured, add `needs-human-input` label |
+
+### CI Check Commands Reference
+
+```bash
+# Quick check: Are all CI checks passing?
+gh pr checks <pr-number>
+# Output: "All checks pass" or shows failing checks
+
+# Detailed check: Get all check run details
+gh pr view <pr-number> --json statusCheckRollup --jq '.statusCheckRollup[] | select(.conclusion != "success") | {name: .name, status: .status, conclusion: .conclusion}'
+# Returns only non-successful checks
+
+# Check CI on specific commit
+gh api repos/{owner}/{repo}/commits/<commit-sha>/check-runs --jq '.check_runs[] | {name: .name, status: .status, conclusion: .conclusion}'
+
+# Monitor CI progress (use in loops)
+gh pr view <pr-number> --json statusCheckRollup --jq '[.statusCheckRollup[] | select(.status == "in_progress")] | length'
+# Returns count of in-progress checks
+```
+
+### Handling CI Failures
+
+**When upstream CI fails:**
+
+1. **Identify the failure**:
+   ```bash
+   gh pr checks <pr-number>  # Shows which checks failed
+   gh pr view <pr-number> --json statusCheckRollup --jq '.statusCheckRollup[] | select(.conclusion == "failure")'
+   ```
+
+2. **Spawn a worker to fix**:
+   ```bash
+   multiclaude work "Fix CI failures in PR #<pr-number>: <list of failed checks>" --branch <pr-branch>
+   ```
+
+3. **Notify supervisor**:
+   ```bash
+   multiclaude agent send-message supervisor "PR #<pr-number> has failing upstream CI: <list of failed checks>. Spawned worker to address."
+   ```
+
+**When fork CI fails but upstream passes:**
+
+1. **Document the discrepancy**:
+   ```bash
+   gh pr comment <pr-number> --body "## Fork/Upstream CI Discrepancy
+
+   Upstream CI: ✅ Passing
+   Fork CI: ❌ Failing
+
+   This suggests environment-specific issues. Recommended actions:
+   1. Verify fork CI configuration matches upstream
+   2. Check for missing secrets or environment variables
+   3. Review differences in CI workflows
+
+   Flagging for human review to determine if this is acceptable."
+   ```
+
+2. **Add label for review**:
+   ```bash
+   gh pr edit <pr-number> --add-label "needs-human-input"
+   ```
+
+**When CI is stuck/pending:**
+
+If CI has been pending for more than 30 minutes, investigate:
+
+```bash
+# Check when the CI run started
+gh pr view <pr-number> --json statusCheckRollup --jq '.statusCheckRollup[] | select(.status == "in_progress") | {name: .name, started_at: .startedAt}'
+
+# If stuck for >30 min, notify supervisor
+multiclaude agent send-message supervisor "PR #<pr-number> has CI stuck in pending state for >30 minutes. May need manual intervention."
+```
+
+### Integration with Emergency Fix Mode
+
+When in emergency fix mode (main branch CI failing):
+- All normal PR merges are blocked
+- Fix PRs still require dual-CI validation
+- Fast-track the fix once both CIs pass
+- Do not skip CI validation even for urgent fixes
+
+### Why This Matters
+
+Skipping CI validation (in either location) can:
+- Introduce breaking changes to the main branch
+- Trigger emergency fix mode
+- Block other PRs from merging
+- Waste developer time debugging preventable issues
+
+**When in doubt about CI status, do not merge.** Ask the supervisor or wait for CI to complete.
+
 ## Asking for Guidance
 
 If you need clarification or guidance from the supervisor:
