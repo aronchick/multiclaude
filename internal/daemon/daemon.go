@@ -105,12 +105,13 @@ func (d *Daemon) Start() error {
 	d.restoreTrackedRepos()
 
 	// Start core loops after restore completes
-	d.wg.Add(5)
+	d.wg.Add(6)
 	go d.healthCheckLoop()
 	go d.messageRouterLoop()
 	go d.wakeLoop()
 	go d.serverLoop()
 	go d.updateCheckLoop()
+	go d.worktreeRefreshLoop()
 
 	return nil
 }
@@ -458,6 +459,125 @@ func (d *Daemon) wakeAgents() {
 			d.logger.Debug("Woke agent %s in repo %s", agentName, repoName)
 		}
 	}
+}
+
+// worktreeRefreshLoop periodically syncs worker worktrees with main branch
+func (d *Daemon) worktreeRefreshLoop() {
+	defer d.wg.Done()
+	d.logger.Info("Starting worktree refresh loop")
+
+	// Run every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	// Run once after a short delay on startup
+	time.Sleep(30 * time.Second)
+	d.refreshWorktrees()
+
+	for {
+		select {
+		case <-ticker.C:
+			d.refreshWorktrees()
+		case <-d.ctx.Done():
+			d.logger.Info("Worktree refresh loop stopped")
+			return
+		}
+	}
+}
+
+// refreshWorktrees syncs worker worktrees that are behind main
+func (d *Daemon) refreshWorktrees() {
+	d.logger.Debug("Checking worker worktrees for refresh")
+
+	repos := d.state.GetAllRepos()
+	for repoName, repo := range repos {
+		repoPath := d.paths.RepoDir(repoName)
+
+		// Check if repo path exists
+		if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+			continue
+		}
+
+		wt := worktree.NewManager(repoPath)
+
+		// Get the upstream remote and default branch
+		remote, err := wt.GetUpstreamRemote()
+		if err != nil {
+			d.logger.Debug("Could not get remote for %s: %v", repoName, err)
+			continue
+		}
+
+		mainBranch, err := wt.GetDefaultBranch(remote)
+		if err != nil {
+			d.logger.Debug("Could not get default branch for %s: %v", repoName, err)
+			continue
+		}
+
+		// Fetch from remote to have latest state
+		if err := wt.FetchRemote(remote); err != nil {
+			d.logger.Debug("Could not fetch from remote for %s: %v", repoName, err)
+			continue
+		}
+
+		// Check each worker agent's worktree
+		for agentName, agent := range repo.Agents {
+			// Only refresh worker worktrees
+			if agent.Type != state.AgentTypeWorker {
+				continue
+			}
+
+			// Skip if worktree path is empty
+			if agent.WorktreePath == "" {
+				continue
+			}
+
+			// Check if worktree exists
+			if _, err := os.Stat(agent.WorktreePath); os.IsNotExist(err) {
+				continue
+			}
+
+			// Check worktree state
+			wtState, err := worktree.GetWorktreeState(agent.WorktreePath, remote, mainBranch)
+			if err != nil {
+				d.logger.Debug("Could not get worktree state for %s/%s: %v", repoName, agentName, err)
+				continue
+			}
+
+			// Skip if can't refresh (detached HEAD, mid-rebase, mid-merge, on main, or up to date)
+			if !wtState.CanRefresh {
+				d.logger.Debug("Skipping refresh for %s/%s: %s", repoName, agentName, wtState.RefreshReason)
+				continue
+			}
+
+			// Refresh the worktree
+			d.logger.Info("Refreshing worktree for %s/%s (%d commits behind)", repoName, agentName, wtState.CommitsBehind)
+			result := worktree.RefreshWorktree(agent.WorktreePath, remote, mainBranch)
+
+			if result.Error != nil {
+				if result.HasConflicts {
+					d.logger.Warn("Worktree refresh for %s/%s has conflicts in: %v", repoName, agentName, result.ConflictFiles)
+				} else {
+					d.logger.Error("Failed to refresh worktree for %s/%s: %v", repoName, agentName, result.Error)
+				}
+			} else if result.Skipped {
+				d.logger.Debug("Worktree refresh for %s/%s skipped: %s", repoName, agentName, result.SkipReason)
+			} else {
+				d.logger.Info("Refreshed worktree for %s/%s: rebased %d commits", repoName, agentName, result.CommitsRebased)
+
+				// Notify the agent that their worktree was refreshed
+				msgMgr := d.getMessageManager()
+				msg := fmt.Sprintf("Your worktree has been automatically synced with main (rebased %d commits). Run 'git log --oneline -5' to see recent changes.", result.CommitsRebased)
+				if _, err := msgMgr.Send(repoName, "daemon", agentName, msg); err != nil {
+					d.logger.Debug("Could not send refresh notification to %s/%s: %v", repoName, agentName, err)
+				}
+			}
+		}
+	}
+}
+
+// TriggerWorktreeRefresh triggers an immediate worktree refresh (for testing)
+func (d *Daemon) TriggerWorktreeRefresh() {
+	d.refreshWorktrees()
 }
 
 // handleRequest handles incoming socket requests
