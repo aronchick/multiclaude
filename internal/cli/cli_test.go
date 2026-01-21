@@ -2218,21 +2218,22 @@ func TestLinkGlobalCredentials(t *testing.T) {
 	defer os.Setenv("HOME", originalHome)
 
 	cli := &CLI{}
+	expectedContent := `{"token":"test123"}`
 
-	// Test 1: Create symlink successfully (also creates the config directory)
+	// Test 1: Copy credentials successfully (also creates the config directory)
 	if err := cli.linkGlobalCredentials(configDir); err != nil {
 		t.Fatalf("linkGlobalCredentials failed: %v", err)
 	}
 
-	// Verify symlink exists and points to right place
+	// Verify file exists and has correct content
 	localCred := filepath.Join(configDir, ".credentials.json")
-	target, err := os.Readlink(localCred)
+	content, err := os.ReadFile(localCred)
 	if err != nil {
-		t.Fatalf("Symlink not created: %v", err)
+		t.Fatalf("Credentials file not created: %v", err)
 	}
 
-	if target != globalCred {
-		t.Errorf("Symlink points to %s, expected %s", target, globalCred)
+	if string(content) != expectedContent {
+		t.Errorf("Credentials content is %s, expected %s", string(content), expectedContent)
 	}
 
 	// Test 2: Running again should not error (idempotent)
@@ -2240,23 +2241,22 @@ func TestLinkGlobalCredentials(t *testing.T) {
 		t.Errorf("linkGlobalCredentials should be idempotent: %v", err)
 	}
 
-	// Test 3: If file exists instead of symlink, it should be replaced
-	os.Remove(localCred)
+	// Test 3: If file exists with wrong content, it should be replaced
 	if err := os.WriteFile(localCred, []byte("bad content"), 0644); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
 	if err := cli.linkGlobalCredentials(configDir); err != nil {
-		t.Errorf("linkGlobalCredentials should replace file with symlink: %v", err)
+		t.Errorf("linkGlobalCredentials should replace file with correct content: %v", err)
 	}
 
-	// Verify it's now a symlink
-	target, err = os.Readlink(localCred)
+	// Verify it has correct content
+	content, err = os.ReadFile(localCred)
 	if err != nil {
-		t.Errorf("Should have created symlink: %v", err)
+		t.Errorf("Should have created credentials file: %v", err)
 	}
-	if target != globalCred {
-		t.Errorf("Symlink points to %s, expected %s", target, globalCred)
+	if string(content) != expectedContent {
+		t.Errorf("Credentials content is %s, expected %s", string(content), expectedContent)
 	}
 
 	// Test 4: No global credentials should not error
@@ -2326,8 +2326,8 @@ func TestRepairCredentials(t *testing.T) {
 	}
 
 	// worker1: No credentials (needs repair)
-	// worker2: Has valid symlink (should be skipped)
-	// worker3: Has file instead of symlink (needs repair)
+	// worker2: Has symlink (needs repair - symlinks must be replaced with copies)
+	// worker3: Has file with wrong content (needs repair)
 
 	worker2Cred := filepath.Join(claudeConfigDir, "test-repo", "worker2", ".credentials.json")
 	if err := os.Symlink(globalCred, worker2Cred); err != nil {
@@ -2346,21 +2346,36 @@ func TestRepairCredentials(t *testing.T) {
 		t.Fatalf("repairCredentials failed: %v", err)
 	}
 
-	// Should have fixed 2 agents (worker1 and worker3)
-	if fixed != 2 {
-		t.Errorf("Expected 2 agents fixed, got %d", fixed)
+	// Should have fixed all 3 agents (symlinks are now replaced with copies)
+	if fixed != 3 {
+		t.Errorf("Expected 3 agents fixed, got %d", fixed)
 	}
 
-	// Verify all three now have valid symlinks
+	expectedContent := `{"token":"test"}`
+
+	// Verify all three now have valid credential files (not symlinks)
 	for _, agent := range agents {
 		credPath := filepath.Join(claudeConfigDir, "test-repo", agent, ".credentials.json")
-		target, err := os.Readlink(credPath)
+
+		// Should be a regular file, not a symlink
+		info, err := os.Lstat(credPath)
 		if err != nil {
-			t.Errorf("Agent %s should have symlink: %v", agent, err)
+			t.Errorf("Agent %s should have credentials file: %v", agent, err)
 			continue
 		}
-		if target != globalCred {
-			t.Errorf("Agent %s symlink points to %s, expected %s", agent, target, globalCred)
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("Agent %s should have regular file, not symlink", agent)
+			continue
+		}
+
+		// Should have correct content
+		content, err := os.ReadFile(credPath)
+		if err != nil {
+			t.Errorf("Agent %s failed to read credentials: %v", agent, err)
+			continue
+		}
+		if string(content) != expectedContent {
+			t.Errorf("Agent %s credentials content is %s, expected %s", agent, string(content), expectedContent)
 		}
 	}
 }
