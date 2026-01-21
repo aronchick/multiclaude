@@ -2437,3 +2437,265 @@ func TestIsBehindMain(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckUpstreamDivergence(t *testing.T) {
+	t.Run("no divergence", func(t *testing.T) {
+		// Create upstream repo
+		upstreamRepo, cleanupUpstream := createTestRepo(t)
+		defer cleanupUpstream()
+
+		// Create local repo
+		localRepo, cleanupLocal := createTestRepo(t)
+		defer cleanupLocal()
+
+		manager := NewManager(localRepo)
+
+		// Add upstream remote
+		cmd := exec.Command("git", "remote", "add", "upstream", upstreamRepo)
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add upstream remote: %v", err)
+		}
+
+		// Fetch from upstream
+		cmd = exec.Command("git", "fetch", "upstream")
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to fetch upstream: %v", err)
+		}
+
+		// Reset main to upstream/main (no divergence)
+		cmd = exec.Command("git", "reset", "--hard", "upstream/main")
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to reset to upstream/main: %v", err)
+		}
+
+		ahead, behind, err := manager.CheckUpstreamDivergence()
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		if ahead != 0 {
+			t.Errorf("Expected 0 commits ahead, got %d", ahead)
+		}
+		if behind != 0 {
+			t.Errorf("Expected 0 commits behind, got %d", behind)
+		}
+	})
+
+	t.Run("ahead only", func(t *testing.T) {
+		// Create upstream repo
+		upstreamRepo, cleanupUpstream := createTestRepo(t)
+		defer cleanupUpstream()
+
+		// Create local repo
+		localRepo, cleanupLocal := createTestRepo(t)
+		defer cleanupLocal()
+
+		manager := NewManager(localRepo)
+
+		// Add upstream remote
+		cmd := exec.Command("git", "remote", "add", "upstream", upstreamRepo)
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add upstream remote: %v", err)
+		}
+
+		// Fetch from upstream
+		cmd = exec.Command("git", "fetch", "upstream")
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to fetch upstream: %v", err)
+		}
+
+		// Reset main to upstream/main first
+		cmd = exec.Command("git", "reset", "--hard", "upstream/main")
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to reset to upstream/main: %v", err)
+		}
+
+		// Create 2 commits on local main
+		for i := 0; i < 2; i++ {
+			testFile := filepath.Join(localRepo, fmt.Sprintf("local%d.txt", i))
+			if err := os.WriteFile(testFile, []byte(fmt.Sprintf("local commit %d\n", i)), 0644); err != nil {
+				t.Fatalf("Failed to create test file: %v", err)
+			}
+
+			cmd = exec.Command("git", "add", ".")
+			cmd.Dir = localRepo
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("Failed to git add: %v", err)
+			}
+
+			cmd = exec.Command("git", "commit", "-m", fmt.Sprintf("Local commit %d", i))
+			cmd.Dir = localRepo
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("Failed to commit: %v", err)
+			}
+		}
+
+		ahead, behind, err := manager.CheckUpstreamDivergence()
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		if ahead != 2 {
+			t.Errorf("Expected 2 commits ahead, got %d", ahead)
+		}
+		if behind != 0 {
+			t.Errorf("Expected 0 commits behind, got %d", behind)
+		}
+	})
+
+	t.Run("behind only", func(t *testing.T) {
+		// Create upstream repo
+		upstreamRepo, cleanupUpstream := createTestRepo(t)
+		defer cleanupUpstream()
+
+		// Create 3 commits on upstream
+		for i := 0; i < 3; i++ {
+			testFile := filepath.Join(upstreamRepo, fmt.Sprintf("upstream%d.txt", i))
+			if err := os.WriteFile(testFile, []byte(fmt.Sprintf("upstream commit %d\n", i)), 0644); err != nil {
+				t.Fatalf("Failed to create test file: %v", err)
+			}
+
+			cmd := exec.Command("git", "add", ".")
+			cmd.Dir = upstreamRepo
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("Failed to git add: %v", err)
+			}
+
+			cmd = exec.Command("git", "commit", "-m", fmt.Sprintf("Upstream commit %d", i))
+			cmd.Dir = upstreamRepo
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("Failed to commit: %v", err)
+			}
+		}
+
+		// Create local repo
+		localRepo, cleanupLocal := createTestRepo(t)
+		defer cleanupLocal()
+
+		manager := NewManager(localRepo)
+
+		// Add upstream remote
+		cmd := exec.Command("git", "remote", "add", "upstream", upstreamRepo)
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add upstream remote: %v", err)
+		}
+
+		// Fetch from upstream
+		cmd = exec.Command("git", "fetch", "upstream")
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to fetch upstream: %v", err)
+		}
+
+		ahead, behind, err := manager.CheckUpstreamDivergence()
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		if ahead != 0 {
+			t.Errorf("Expected 0 commits ahead, got %d", ahead)
+		}
+		if behind != 3 {
+			t.Errorf("Expected 3 commits behind, got %d", behind)
+		}
+	})
+
+	t.Run("both ahead and behind", func(t *testing.T) {
+		// Create upstream repo
+		upstreamRepo, cleanupUpstream := createTestRepo(t)
+		defer cleanupUpstream()
+
+		// Clone to create a common ancestor
+		localRepo, cleanupLocal := createTestRepo(t)
+		defer cleanupLocal()
+
+		manager := NewManager(localRepo)
+
+		// Add upstream remote
+		cmd := exec.Command("git", "remote", "add", "upstream", upstreamRepo)
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add upstream remote: %v", err)
+		}
+
+		// Fetch from upstream
+		cmd = exec.Command("git", "fetch", "upstream")
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to fetch upstream: %v", err)
+		}
+
+		// Reset both to same point
+		cmd = exec.Command("git", "reset", "--hard", "upstream/main")
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to reset to upstream/main: %v", err)
+		}
+
+		// Create 2 commits on upstream
+		for i := 0; i < 2; i++ {
+			testFile := filepath.Join(upstreamRepo, fmt.Sprintf("upstream%d.txt", i))
+			if err := os.WriteFile(testFile, []byte(fmt.Sprintf("upstream commit %d\n", i)), 0644); err != nil {
+				t.Fatalf("Failed to create test file: %v", err)
+			}
+
+			cmd := exec.Command("git", "add", ".")
+			cmd.Dir = upstreamRepo
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("Failed to git add: %v", err)
+			}
+
+			cmd = exec.Command("git", "commit", "-m", fmt.Sprintf("Upstream commit %d", i))
+			cmd.Dir = upstreamRepo
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("Failed to commit: %v", err)
+			}
+		}
+
+		// Create 3 commits on local
+		for i := 0; i < 3; i++ {
+			testFile := filepath.Join(localRepo, fmt.Sprintf("local%d.txt", i))
+			if err := os.WriteFile(testFile, []byte(fmt.Sprintf("local commit %d\n", i)), 0644); err != nil {
+				t.Fatalf("Failed to create test file: %v", err)
+			}
+
+			cmd = exec.Command("git", "add", ".")
+			cmd.Dir = localRepo
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("Failed to git add: %v", err)
+			}
+
+			cmd = exec.Command("git", "commit", "-m", fmt.Sprintf("Local commit %d", i))
+			cmd.Dir = localRepo
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("Failed to commit: %v", err)
+			}
+		}
+
+		// Fetch again to get upstream changes
+		cmd = exec.Command("git", "fetch", "upstream")
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to fetch upstream: %v", err)
+		}
+
+		ahead, behind, err := manager.CheckUpstreamDivergence()
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
+		if ahead != 3 {
+			t.Errorf("Expected 3 commits ahead, got %d", ahead)
+		}
+		if behind != 2 {
+			t.Errorf("Expected 2 commits behind, got %d", behind)
+		}
+	})
+}

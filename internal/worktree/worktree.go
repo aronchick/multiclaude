@@ -899,3 +899,39 @@ func (m *Manager) RefreshWorktreeWithDefaults(worktreePath string) RefreshResult
 
 	return RefreshWorktree(worktreePath, remote, mainBranch)
 }
+
+// CheckUpstreamDivergence checks how many commits main is ahead/behind upstream/main.
+// Returns (ahead int, behind int, error) where:
+//   - ahead: number of commits in main that are not in upstream/main
+//   - behind: number of commits in upstream/main that are not in main
+func (m *Manager) CheckUpstreamDivergence() (int, int, error) {
+	// Check commits ahead (upstream/main..main)
+	cmd := exec.Command("git", "rev-list", "--count", "upstream/main..main")
+	cmd.Dir = m.repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to check commits ahead: %w", err)
+	}
+
+	aheadStr := strings.TrimSpace(string(output))
+	var ahead int
+	if _, err := fmt.Sscanf(aheadStr, "%d", &ahead); err != nil {
+		return 0, 0, fmt.Errorf("failed to parse ahead count: %w", err)
+	}
+
+	// Check commits behind (main..upstream/main)
+	cmd = exec.Command("git", "rev-list", "--count", "main..upstream/main")
+	cmd.Dir = m.repoPath
+	output, err = cmd.Output()
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to check commits behind: %w", err)
+	}
+
+	behindStr := strings.TrimSpace(string(output))
+	var behind int
+	if _, err := fmt.Sscanf(behindStr, "%d", &behind); err != nil {
+		return 0, 0, fmt.Errorf("failed to parse behind count: %w", err)
+	}
+
+	return ahead, behind, nil
+}
