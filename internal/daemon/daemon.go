@@ -470,9 +470,14 @@ func (d *Daemon) worktreeRefreshLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
-	// Run once after a short delay on startup
-	time.Sleep(30 * time.Second)
-	d.refreshWorktrees()
+	// Run once after a short delay on startup (respecting context cancellation)
+	select {
+	case <-time.After(30 * time.Second):
+		d.refreshWorktrees()
+	case <-d.ctx.Done():
+		d.logger.Info("Worktree refresh loop stopped")
+		return
+	}
 
 	for {
 		select {
@@ -2218,8 +2223,14 @@ func (d *Daemon) updateCheckLoop() {
 	defer ticker.Stop()
 
 	// Run once immediately on startup (with a small delay to let daemon stabilize)
-	time.Sleep(10 * time.Second)
-	d.checkForUpdates()
+	// Use select to respect context cancellation during the delay
+	select {
+	case <-time.After(10 * time.Second):
+		d.checkForUpdates()
+	case <-d.ctx.Done():
+		d.logger.Info("Update check loop stopped")
+		return
+	}
 
 	for {
 		select {
