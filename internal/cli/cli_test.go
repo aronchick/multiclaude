@@ -328,7 +328,7 @@ func setupTestEnvironment(t *testing.T) (*CLI, *daemon.Daemon, func()) {
 	}
 
 	// Create daemon
-	d, err := daemon.New(paths, "test")
+	d, err := daemon.New(paths)
 	if err != nil {
 		t.Fatalf("Failed to create daemon: %v", err)
 	}
@@ -2195,272 +2195,340 @@ func TestSanitizeTmuxSessionName(t *testing.T) {
 	}
 }
 
-func TestLinkGlobalCredentials(t *testing.T) {
-	// Create temp directories for test
-	tmpDir := t.TempDir()
-	home := filepath.Join(tmpDir, "home")
-	configDir := filepath.Join(tmpDir, "claude-config")
-
-	// Create directory structure
-	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0755); err != nil {
-		t.Fatalf("Failed to create home .claude dir: %v", err)
-	}
-
-	// Create mock global credentials
-	globalCred := filepath.Join(home, ".claude", ".credentials.json")
-	if err := os.WriteFile(globalCred, []byte(`{"token":"test123"}`), 0600); err != nil {
-		t.Fatalf("Failed to create global credentials: %v", err)
-	}
-
-	// Mock UserHomeDir to return our test home
-	originalHome := os.Getenv("HOME")
-	os.Setenv("HOME", home)
-	defer os.Setenv("HOME", originalHome)
-
-	cli := &CLI{}
-	expectedContent := `{"token":"test123"}`
-
-	// Test 1: Copy credentials successfully (also creates the config directory)
-	if err := cli.linkGlobalCredentials(configDir); err != nil {
-		t.Fatalf("linkGlobalCredentials failed: %v", err)
-	}
-
-	// Verify file exists and has correct content
-	localCred := filepath.Join(configDir, ".credentials.json")
-	content, err := os.ReadFile(localCred)
-	if err != nil {
-		t.Fatalf("Credentials file not created: %v", err)
-	}
-
-	if string(content) != expectedContent {
-		t.Errorf("Credentials content is %s, expected %s", string(content), expectedContent)
-	}
-
-	// Test 2: Running again should not error (idempotent)
-	if err := cli.linkGlobalCredentials(configDir); err != nil {
-		t.Errorf("linkGlobalCredentials should be idempotent: %v", err)
-	}
-
-	// Test 3: If file exists with wrong content, it should be replaced
-	if err := os.WriteFile(localCred, []byte("bad content"), 0644); err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	if err := cli.linkGlobalCredentials(configDir); err != nil {
-		t.Errorf("linkGlobalCredentials should replace file with correct content: %v", err)
-	}
-
-	// Verify it has correct content
-	content, err = os.ReadFile(localCred)
-	if err != nil {
-		t.Errorf("Should have created credentials file: %v", err)
-	}
-	if string(content) != expectedContent {
-		t.Errorf("Credentials content is %s, expected %s", string(content), expectedContent)
-	}
-
-	// Test 4: No global credentials should not error
-	configDir2 := filepath.Join(tmpDir, "claude-config2")
-
-	os.Remove(globalCred)
-	if err := cli.linkGlobalCredentials(configDir2); err != nil {
-		t.Errorf("linkGlobalCredentials should not error when no global credentials: %v", err)
-	}
-
-	// Verify no symlink was created
-	localCred2 := filepath.Join(configDir2, ".credentials.json")
-	if _, err := os.Lstat(localCred2); !os.IsNotExist(err) {
-		t.Error("Should not have created symlink when no global credentials")
-	}
-}
-
-func TestRepairCredentials(t *testing.T) {
-	tmpDir := t.TempDir()
-	home := filepath.Join(tmpDir, "home")
-	claudeConfigDir := filepath.Join(tmpDir, "claude-config")
-
-	// Create global credentials
-	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0755); err != nil {
-		t.Fatalf("Failed to create home .claude dir: %v", err)
-	}
-	globalCred := filepath.Join(home, ".claude", ".credentials.json")
-	if err := os.WriteFile(globalCred, []byte(`{"token":"test"}`), 0600); err != nil {
-		t.Fatalf("Failed to create global credentials: %v", err)
-	}
-
-	// Mock UserHomeDir
-	originalHome := os.Getenv("HOME")
-	os.Setenv("HOME", home)
-	defer os.Setenv("HOME", originalHome)
-
-	// Setup paths
-	paths := &config.Paths{
-		Root:            tmpDir,
-		StateFile:       filepath.Join(tmpDir, "state.json"),
-		WorktreesDir:    filepath.Join(tmpDir, "wts"),
-		ClaudeConfigDir: claudeConfigDir,
-	}
-
-	if err := os.MkdirAll(paths.WorktreesDir, 0755); err != nil {
-		t.Fatalf("Failed to create worktrees dir: %v", err)
-	}
-
-	// Create state with a repo
-	st := state.New(paths.StateFile)
-	repo := &state.Repository{
-		GithubURL:   "https://github.com/test/repo",
-		TmuxSession: "mc-test",
-		Agents:      make(map[string]state.Agent),
-	}
-	if err := st.AddRepo("test-repo", repo); err != nil {
-		t.Fatalf("Failed to add repo: %v", err)
-	}
-
-	// Create CLAUDE_CONFIG_DIR directories for agents
-	agents := []string{"worker1", "worker2", "worker3"}
-	for _, agent := range agents {
-		agentConfigDir := filepath.Join(claudeConfigDir, "test-repo", agent)
-		if err := os.MkdirAll(agentConfigDir, 0755); err != nil {
-			t.Fatalf("Failed to create agent config dir: %v", err)
-		}
-	}
-
-	// worker1: No credentials (needs repair)
-	// worker2: Has symlink (needs repair - symlinks must be replaced with copies)
-	// worker3: Has file with wrong content (needs repair)
-
-	worker2Cred := filepath.Join(claudeConfigDir, "test-repo", "worker2", ".credentials.json")
-	if err := os.Symlink(globalCred, worker2Cred); err != nil {
-		t.Fatalf("Failed to create worker2 symlink: %v", err)
-	}
-
-	worker3Cred := filepath.Join(claudeConfigDir, "test-repo", "worker3", ".credentials.json")
-	if err := os.WriteFile(worker3Cred, []byte("wrong"), 0644); err != nil {
-		t.Fatalf("Failed to create worker3 file: %v", err)
-	}
-
-	// Create CLI and run repair
-	cli := &CLI{paths: paths}
-	fixed, err := cli.repairCredentials(false)
-	if err != nil {
-		t.Fatalf("repairCredentials failed: %v", err)
-	}
-
-	// Should have fixed all 3 agents (symlinks are now replaced with copies)
-	if fixed != 3 {
-		t.Errorf("Expected 3 agents fixed, got %d", fixed)
-	}
-
-	expectedContent := `{"token":"test"}`
-
-	// Verify all three now have valid credential files (not symlinks)
-	for _, agent := range agents {
-		credPath := filepath.Join(claudeConfigDir, "test-repo", agent, ".credentials.json")
-
-		// Should be a regular file, not a symlink
-		info, err := os.Lstat(credPath)
-		if err != nil {
-			t.Errorf("Agent %s should have credentials file: %v", agent, err)
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			t.Errorf("Agent %s should have regular file, not symlink", agent)
-			continue
-		}
-
-		// Should have correct content
-		content, err := os.ReadFile(credPath)
-		if err != nil {
-			t.Errorf("Agent %s failed to read credentials: %v", agent, err)
-			continue
-		}
-		if string(content) != expectedContent {
-			t.Errorf("Agent %s credentials content is %s, expected %s", agent, string(content), expectedContent)
-		}
-	}
-}
-
-func TestGetVersion(t *testing.T) {
-	// Save original version
-	originalVersion := Version
-	defer func() { Version = originalVersion }()
-
+func TestNormalizeGitHubURL(t *testing.T) {
 	tests := []struct {
-		name        string
-		version     string
-		wantPrefix  string
-		wantSuffix  string
-		wantContain string
+		name string
+		url  string
+		want string
 	}{
 		{
-			name:       "release version unchanged",
-			version:    "v1.2.3",
-			wantPrefix: "v1.2.3",
+			name: "SSH format",
+			url:  "git@github.com:user/repo.git",
+			want: "github.com/user/repo",
 		},
 		{
-			name:       "semver without v prefix unchanged",
-			version:    "1.0.0",
-			wantPrefix: "1.0.0",
+			name: "SSH format without .git",
+			url:  "git@github.com:user/repo",
+			want: "github.com/user/repo",
 		},
 		{
-			name:        "dev version gets semver format",
-			version:     "dev",
-			wantPrefix:  "0.0.0",
-			wantContain: "dev",
+			name: "HTTPS format",
+			url:  "https://github.com/user/repo",
+			want: "github.com/user/repo",
+		},
+		{
+			name: "HTTPS format with .git",
+			url:  "https://github.com/user/repo.git",
+			want: "github.com/user/repo",
+		},
+		{
+			name: "HTTP format",
+			url:  "http://github.com/user/repo",
+			want: "github.com/user/repo",
+		},
+		{
+			name: "git:// protocol",
+			url:  "git://github.com/user/repo.git",
+			want: "github.com/user/repo",
+		},
+		{
+			name: "mixed case",
+			url:  "https://GitHub.com/User/Repo",
+			want: "github.com/user/repo",
+		},
+		{
+			name: "whitespace trimmed",
+			url:  "  https://github.com/user/repo  ",
+			want: "github.com/user/repo",
+		},
+		{
+			name: "non-GitHub URL",
+			url:  "https://gitlab.com/user/repo",
+			want: "",
+		},
+		{
+			name: "empty string",
+			url:  "",
+			want: "",
+		},
+		{
+			name: "organization repo SSH",
+			url:  "git@github.com:myorg/myproject.git",
+			want: "github.com/myorg/myproject",
+		},
+		{
+			name: "nested path SSH",
+			url:  "git@github.com:user/nested/path.git",
+			want: "github.com/user/nested/path",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			Version = tt.version
-			got := GetVersion()
-
-			if tt.wantPrefix != "" && !strings.HasPrefix(got, tt.wantPrefix) {
-				t.Errorf("GetVersion() = %q, want prefix %q", got, tt.wantPrefix)
-			}
-			if tt.wantSuffix != "" && !strings.HasSuffix(got, tt.wantSuffix) {
-				t.Errorf("GetVersion() = %q, want suffix %q", got, tt.wantSuffix)
-			}
-			if tt.wantContain != "" && !strings.Contains(got, tt.wantContain) {
-				t.Errorf("GetVersion() = %q, want to contain %q", got, tt.wantContain)
+			got := normalizeGitHubURL(tt.url)
+			if got != tt.want {
+				t.Errorf("normalizeGitHubURL(%q) = %q, want %q", tt.url, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestIsDevVersion(t *testing.T) {
-	// Save original version
-	originalVersion := Version
-	defer func() { Version = originalVersion }()
-
-	tests := []struct {
-		name    string
-		version string
-		want    bool
-	}{
-		{
-			name:    "dev is dev version",
-			version: "dev",
-			want:    true,
-		},
-		{
-			name:    "release version is not dev",
-			version: "v1.2.3",
-			want:    false,
-		},
-		{
-			name:    "semver is not dev",
-			version: "1.0.0",
-			want:    false,
-		},
+func TestFindRepoFromGitRemote(t *testing.T) {
+	// Save original working directory
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get original working directory: %v", err)
 	}
+	defer os.Chdir(origWd)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			Version = tt.version
-			if got := IsDevVersion(); got != tt.want {
-				t.Errorf("IsDevVersion() = %v, want %v", got, tt.want)
-			}
+	t.Run("matches HTTPS URL in state with SSH remote", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		stateFile := filepath.Join(tmpDir, "state.json")
+
+		// Create state with HTTPS URL
+		st := state.New(stateFile)
+		st.AddRepo("my-repo", &state.Repository{
+			GithubURL:   "https://github.com/myuser/myrepo",
+			TmuxSession: "mc-my-repo",
+			Agents:      make(map[string]state.Agent),
 		})
-	}
+
+		// Create a git repo with SSH remote
+		gitDir := filepath.Join(tmpDir, "git-test")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatalf("failed to create git dir: %v", err)
+		}
+		if err := os.Chdir(gitDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+
+		// Initialize git repo and set remote
+		if err := exec.Command("git", "init").Run(); err != nil {
+			t.Fatalf("failed to init git: %v", err)
+		}
+		if err := exec.Command("git", "remote", "add", "origin", "git@github.com:myuser/myrepo.git").Run(); err != nil {
+			t.Fatalf("failed to add remote: %v", err)
+		}
+
+		cli := &CLI{
+			paths: &config.Paths{
+				StateFile: stateFile,
+			},
+		}
+
+		repoName, err := cli.findRepoFromGitRemote()
+		if err != nil {
+			t.Fatalf("findRepoFromGitRemote() error: %v", err)
+		}
+		if repoName != "my-repo" {
+			t.Errorf("findRepoFromGitRemote() = %q, want %q", repoName, "my-repo")
+		}
+	})
+
+	t.Run("matches SSH URL in state with HTTPS remote", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		stateFile := filepath.Join(tmpDir, "state.json")
+
+		// Create state with SSH URL
+		st := state.New(stateFile)
+		st.AddRepo("another-repo", &state.Repository{
+			GithubURL:   "git@github.com:anotheruser/anotherrepo.git",
+			TmuxSession: "mc-another-repo",
+			Agents:      make(map[string]state.Agent),
+		})
+
+		// Create a git repo with HTTPS remote
+		gitDir := filepath.Join(tmpDir, "git-test")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatalf("failed to create git dir: %v", err)
+		}
+		if err := os.Chdir(gitDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+
+		// Initialize git repo and set remote
+		if err := exec.Command("git", "init").Run(); err != nil {
+			t.Fatalf("failed to init git: %v", err)
+		}
+		if err := exec.Command("git", "remote", "add", "origin", "https://github.com/anotheruser/anotherrepo").Run(); err != nil {
+			t.Fatalf("failed to add remote: %v", err)
+		}
+
+		cli := &CLI{
+			paths: &config.Paths{
+				StateFile: stateFile,
+			},
+		}
+
+		repoName, err := cli.findRepoFromGitRemote()
+		if err != nil {
+			t.Fatalf("findRepoFromGitRemote() error: %v", err)
+		}
+		if repoName != "another-repo" {
+			t.Errorf("findRepoFromGitRemote() = %q, want %q", repoName, "another-repo")
+		}
+	})
+
+	t.Run("no match returns error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		stateFile := filepath.Join(tmpDir, "state.json")
+
+		// Create state with different URL
+		st := state.New(stateFile)
+		st.AddRepo("other-repo", &state.Repository{
+			GithubURL:   "https://github.com/different/repo",
+			TmuxSession: "mc-other-repo",
+			Agents:      make(map[string]state.Agent),
+		})
+
+		// Create a git repo with non-matching remote
+		gitDir := filepath.Join(tmpDir, "git-test")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatalf("failed to create git dir: %v", err)
+		}
+		if err := os.Chdir(gitDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+
+		// Initialize git repo and set remote
+		if err := exec.Command("git", "init").Run(); err != nil {
+			t.Fatalf("failed to init git: %v", err)
+		}
+		if err := exec.Command("git", "remote", "add", "origin", "git@github.com:nomatch/norepo.git").Run(); err != nil {
+			t.Fatalf("failed to add remote: %v", err)
+		}
+
+		cli := &CLI{
+			paths: &config.Paths{
+				StateFile: stateFile,
+			},
+		}
+
+		_, err := cli.findRepoFromGitRemote()
+		if err == nil {
+			t.Error("findRepoFromGitRemote() expected error for non-matching remote")
+		}
+	})
+
+	t.Run("not in git repo returns error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		stateFile := filepath.Join(tmpDir, "state.json")
+
+		// Create empty state
+		_ = state.New(stateFile)
+
+		// Not a git directory
+		if err := os.Chdir(tmpDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+
+		cli := &CLI{
+			paths: &config.Paths{
+				StateFile: stateFile,
+			},
+		}
+
+		_, err := cli.findRepoFromGitRemote()
+		if err == nil {
+			t.Error("findRepoFromGitRemote() expected error when not in git repo")
+		}
+	})
+
+	t.Run("case insensitive matching", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		stateFile := filepath.Join(tmpDir, "state.json")
+
+		// Create state with mixed case URL
+		st := state.New(stateFile)
+		st.AddRepo("case-test", &state.Repository{
+			GithubURL:   "https://GitHub.com/MyUser/MyRepo",
+			TmuxSession: "mc-case-test",
+			Agents:      make(map[string]state.Agent),
+		})
+
+		// Create a git repo with different case remote
+		gitDir := filepath.Join(tmpDir, "git-test")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatalf("failed to create git dir: %v", err)
+		}
+		if err := os.Chdir(gitDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+
+		// Initialize git repo and set remote with different case
+		if err := exec.Command("git", "init").Run(); err != nil {
+			t.Fatalf("failed to init git: %v", err)
+		}
+		if err := exec.Command("git", "remote", "add", "origin", "git@github.com:myuser/myrepo.git").Run(); err != nil {
+			t.Fatalf("failed to add remote: %v", err)
+		}
+
+		cli := &CLI{
+			paths: &config.Paths{
+				StateFile: stateFile,
+			},
+		}
+
+		repoName, err := cli.findRepoFromGitRemote()
+		if err != nil {
+			t.Fatalf("findRepoFromGitRemote() error: %v", err)
+		}
+		if repoName != "case-test" {
+			t.Errorf("findRepoFromGitRemote() = %q, want %q", repoName, "case-test")
+		}
+	})
+
+	t.Run("multiple repos selects correct one", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		stateFile := filepath.Join(tmpDir, "state.json")
+
+		// Create state with multiple repos
+		st := state.New(stateFile)
+		st.AddRepo("repo-a", &state.Repository{
+			GithubURL:   "https://github.com/user/repo-a",
+			TmuxSession: "mc-repo-a",
+			Agents:      make(map[string]state.Agent),
+		})
+		st.AddRepo("repo-b", &state.Repository{
+			GithubURL:   "https://github.com/user/repo-b",
+			TmuxSession: "mc-repo-b",
+			Agents:      make(map[string]state.Agent),
+		})
+		st.AddRepo("repo-c", &state.Repository{
+			GithubURL:   "https://github.com/user/repo-c",
+			TmuxSession: "mc-repo-c",
+			Agents:      make(map[string]state.Agent),
+		})
+
+		// Create a git repo pointing to repo-b
+		gitDir := filepath.Join(tmpDir, "git-test")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatalf("failed to create git dir: %v", err)
+		}
+		if err := os.Chdir(gitDir); err != nil {
+			t.Fatalf("failed to chdir: %v", err)
+		}
+
+		// Initialize git repo and set remote
+		if err := exec.Command("git", "init").Run(); err != nil {
+			t.Fatalf("failed to init git: %v", err)
+		}
+		if err := exec.Command("git", "remote", "add", "origin", "git@github.com:user/repo-b.git").Run(); err != nil {
+			t.Fatalf("failed to add remote: %v", err)
+		}
+
+		cli := &CLI{
+			paths: &config.Paths{
+				StateFile: stateFile,
+			},
+		}
+
+		repoName, err := cli.findRepoFromGitRemote()
+		if err != nil {
+			t.Fatalf("findRepoFromGitRemote() error: %v", err)
+		}
+		if repoName != "repo-b" {
+			t.Errorf("findRepoFromGitRemote() = %q, want %q", repoName, "repo-b")
+		}
+	})
 }
