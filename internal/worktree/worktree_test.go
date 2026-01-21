@@ -1798,3 +1798,202 @@ func TestCleanupMergedBranches(t *testing.T) {
 		}
 	})
 }
+
+func TestRefreshWorktree(t *testing.T) {
+	t.Run("refreshes worktree with no conflicts", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Add origin remote
+		cmd := exec.Command("git", "remote", "add", "origin", repoPath)
+		cmd.Dir = repoPath
+		cmd.Run()
+
+		cmd = exec.Command("git", "fetch", "origin")
+		cmd.Dir = repoPath
+		cmd.Run()
+
+		// Create a worktree with a feature branch
+		wtPath := filepath.Join(repoPath, "wt-refresh")
+		if err := manager.CreateNewBranch(wtPath, "feature/refresh-test", "main"); err != nil {
+			t.Fatalf("Failed to create worktree: %v", err)
+		}
+		defer manager.Remove(wtPath, true)
+
+		// Add a commit to main after creating the worktree
+		testFile := filepath.Join(repoPath, "new-feature.txt")
+		if err := os.WriteFile(testFile, []byte("new content"), 0644); err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+
+		cmd = exec.Command("git", "add", "new-feature.txt")
+		cmd.Dir = repoPath
+		cmd.Run()
+
+		cmd = exec.Command("git", "commit", "-m", "Add new feature")
+		cmd.Dir = repoPath
+		cmd.Run()
+
+		// Update origin ref
+		cmd = exec.Command("git", "fetch", "origin")
+		cmd.Dir = repoPath
+		cmd.Run()
+
+		// Refresh the worktree
+		result := RefreshWorktree(wtPath, "origin", "main")
+
+		if result.Error != nil {
+			t.Errorf("Unexpected error: %v", result.Error)
+		}
+		if result.Skipped {
+			t.Error("Should not have skipped refresh")
+		}
+		if result.HasConflicts {
+			t.Error("Should not have conflicts")
+		}
+		if result.Branch != "feature/refresh-test" {
+			t.Errorf("Expected branch 'feature/refresh-test', got %s", result.Branch)
+		}
+	})
+
+	t.Run("skips main branch", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		// Test refreshing the main repo (which is on main branch)
+		result := RefreshWorktree(repoPath, "origin", "main")
+
+		if !result.Skipped {
+			t.Error("Should have skipped refresh for main branch")
+		}
+		if result.SkipReason != "on main branch" {
+			t.Errorf("Expected skip reason 'on main branch', got %s", result.SkipReason)
+		}
+	})
+
+	t.Run("handles uncommitted changes with stash", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Add origin remote
+		cmd := exec.Command("git", "remote", "add", "origin", repoPath)
+		cmd.Dir = repoPath
+		cmd.Run()
+
+		cmd = exec.Command("git", "fetch", "origin")
+		cmd.Dir = repoPath
+		cmd.Run()
+
+		// Create a worktree with a feature branch
+		wtPath := filepath.Join(repoPath, "wt-stash")
+		if err := manager.CreateNewBranch(wtPath, "feature/stash-test", "main"); err != nil {
+			t.Fatalf("Failed to create worktree: %v", err)
+		}
+		defer manager.Remove(wtPath, true)
+
+		// Create uncommitted changes in the worktree
+		uncommittedFile := filepath.Join(wtPath, "uncommitted.txt")
+		if err := os.WriteFile(uncommittedFile, []byte("uncommitted"), 0644); err != nil {
+			t.Fatalf("Failed to create uncommitted file: %v", err)
+		}
+
+		// Refresh the worktree
+		result := RefreshWorktree(wtPath, "origin", "main")
+
+		if result.Error != nil {
+			t.Errorf("Unexpected error: %v", result.Error)
+		}
+		if !result.WasStashed {
+			t.Error("Should have stashed uncommitted changes")
+		}
+		if !result.StashRestored {
+			t.Error("Should have restored stashed changes")
+		}
+
+		// Verify uncommitted file still exists
+		if _, err := os.Stat(uncommittedFile); os.IsNotExist(err) {
+			t.Error("Uncommitted file should still exist after refresh")
+		}
+	})
+
+	t.Run("handles fetch error", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Create a worktree without adding a remote
+		wtPath := filepath.Join(repoPath, "wt-no-remote")
+		if err := manager.CreateNewBranch(wtPath, "feature/no-remote", "main"); err != nil {
+			t.Fatalf("Failed to create worktree: %v", err)
+		}
+		defer manager.Remove(wtPath, true)
+
+		// Try to refresh with non-existent remote
+		result := RefreshWorktree(wtPath, "nonexistent", "main")
+
+		if result.Error == nil {
+			t.Error("Expected error for non-existent remote")
+		}
+	})
+}
+
+func TestRefreshWorktreeWithDefaults(t *testing.T) {
+	t.Run("uses repository defaults", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Add origin remote
+		cmd := exec.Command("git", "remote", "add", "origin", repoPath)
+		cmd.Dir = repoPath
+		cmd.Run()
+
+		cmd = exec.Command("git", "fetch", "origin")
+		cmd.Dir = repoPath
+		cmd.Run()
+
+		// Create a worktree
+		wtPath := filepath.Join(repoPath, "wt-defaults")
+		if err := manager.CreateNewBranch(wtPath, "feature/defaults-test", "main"); err != nil {
+			t.Fatalf("Failed to create worktree: %v", err)
+		}
+		defer manager.Remove(wtPath, true)
+
+		// Refresh using defaults
+		result := manager.RefreshWorktreeWithDefaults(wtPath)
+
+		if result.Error != nil {
+			t.Errorf("Unexpected error: %v", result.Error)
+		}
+		if result.Branch != "feature/defaults-test" {
+			t.Errorf("Expected branch 'feature/defaults-test', got %s", result.Branch)
+		}
+	})
+
+	t.Run("returns error when no remote", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Create a worktree without remote
+		wtPath := filepath.Join(repoPath, "wt-no-remote")
+		if err := manager.CreateNewBranch(wtPath, "feature/no-remote", "main"); err != nil {
+			t.Fatalf("Failed to create worktree: %v", err)
+		}
+		defer manager.Remove(wtPath, true)
+
+		// Refresh using defaults should fail
+		result := manager.RefreshWorktreeWithDefaults(wtPath)
+
+		if result.Error == nil {
+			t.Error("Expected error when no remote exists")
+		}
+	})
+}
