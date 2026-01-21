@@ -1535,6 +1535,12 @@ func (d *Daemon) restoreRepoAgents(repoName string, repo *state.Repository) erro
 		d.logger.Info("Creating workspace worktree for %s", repoName)
 		wt := worktree.NewManager(repoPath)
 
+		// Prune stale worktree references first - this handles the case where
+		// worktree directories were deleted but git still has references to them
+		if err := wt.Prune(); err != nil {
+			d.logger.Warn("Failed to prune worktrees for %s: %v", repoName, err)
+		}
+
 		// Check for and migrate legacy "workspace" branch to "workspace/default"
 		migrated, migrateErr := wt.MigrateLegacyWorkspaceBranch()
 		if migrateErr != nil {
@@ -1543,11 +1549,21 @@ func (d *Daemon) restoreRepoAgents(repoName string, repo *state.Repository) erro
 			d.logger.Info("Migrated legacy 'workspace' branch to 'workspace/default' for %s", repoName)
 		}
 
-		// Try to create with existing branch using new naming convention first
-		if err := wt.Create(workspacePath, "workspace/default"); err != nil {
-			// Branch doesn't exist, create with new branch
+		// Check if branch already exists to determine which creation method to use
+		branchExists, err := wt.BranchExists("workspace/default")
+		if err != nil {
+			d.logger.Warn("Failed to check if workspace/default branch exists for %s: %v", repoName, err)
+		}
+
+		if branchExists {
+			// Branch exists, create worktree using existing branch
+			if err := wt.Create(workspacePath, "workspace/default"); err != nil {
+				d.logger.Error("Failed to create workspace worktree with existing branch for %s: %v", repoName, err)
+			}
+		} else {
+			// Branch doesn't exist, create worktree with new branch
 			if err := wt.CreateNewBranch(workspacePath, "workspace/default", "HEAD"); err != nil {
-				d.logger.Error("Failed to create workspace worktree for %s: %v", repoName, err)
+				d.logger.Error("Failed to create workspace worktree with new branch for %s: %v", repoName, err)
 			}
 		}
 	}
