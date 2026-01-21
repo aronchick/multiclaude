@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// TestCheckPRTargetScript tests the check-pr-target.sh script that prevents
-// PRs from being created against upstream (dlorenc/multiclaude).
+// TestCheckPRTargetScript tests the check-pr-target.sh script that provides
+// a warning checklist for PRs being created against upstream (dlorenc/multiclaude).
 func TestCheckPRTargetScript(t *testing.T) {
 	// Find the script path relative to the repo root
 	// We need to go up from internal/hooks to find .multiclaude/scripts
@@ -48,22 +48,22 @@ func TestCheckPRTargetScript(t *testing.T) {
 			wantCode: 0,
 		},
 		{
-			name:       "gh pr create to upstream blocked",
+			name:       "gh pr create to upstream allowed with warning",
 			input:      `{"tool_input":{"command":"gh pr create --repo dlorenc/multiclaude --title \"test\""}}`,
-			wantCode:   2,
-			wantStderr: "dlorenc/multiclaude",
+			wantCode:   0,
+			wantStderr: "UPSTREAM PR DETECTED",
 		},
 		{
-			name:       "gh pr create to upstream with -R flag blocked",
+			name:       "gh pr create to upstream with -R flag allowed with warning",
 			input:      `{"tool_input":{"command":"gh pr create -R dlorenc/multiclaude"}}`,
-			wantCode:   2,
-			wantStderr: "dlorenc/multiclaude",
+			wantCode:   0,
+			wantStderr: "UPSTREAM PR DETECTED",
 		},
 		{
-			name:       "case insensitive blocking",
+			name:       "case insensitive upstream detection",
 			input:      `{"tool_input":{"command":"gh pr create --repo DLORENC/MULTICLAUDE"}}`,
-			wantCode:   2,
-			wantStderr: "dlorenc/multiclaude",
+			wantCode:   0,
+			wantStderr: "UPSTREAM PR DETECTED",
 		},
 		{
 			name:     "empty command allowed",
@@ -76,10 +76,10 @@ func TestCheckPRTargetScript(t *testing.T) {
 			wantCode: 0,
 		},
 		{
-			name:       "upstream mentioned anywhere in command blocked",
+			name:       "upstream mentioned anywhere in command shows warning",
 			input:      `{"tool_input":{"command":"gh pr create --body \"fix for dlorenc/multiclaude issue\""}}`,
-			wantCode:   2,
-			wantStderr: "dlorenc/multiclaude",
+			wantCode:   0,
+			wantStderr: "UPSTREAM PR DETECTED",
 		},
 	}
 

@@ -186,19 +186,48 @@ cd multiclaude
 git remote add upstream https://github.com/dlorenc/multiclaude.git
 ```
 
-### Workflow
+### Dual-Layer Workflow (Recommended)
 
-1. **Work in your fork** - Develop on a feature branch in your fork
-2. **Test locally** - Run `go test ./...` to verify everything passes
-3. **Create upstream PR** - Open a PR from your fork to the main repo
+For contributors working from a fork, we recommend a **dual-layer validation workflow**:
+
+1. **First Layer: Fork CI** - Test changes in your fork first
+2. **Second Layer: Upstream** - After validation, contribute to upstream
+
+This approach ensures changes are thoroughly tested before reaching upstream:
 
 ```bash
-# Keep your fork updated
-git fetch upstream
-git checkout main
-git merge upstream/main
-git push origin main
+# Step 1: Create and test PR in your fork
+git checkout -b feature/my-change
+# ... make changes ...
+git push -u origin feature/my-change
+gh pr create --repo YOUR-USERNAME/multiclaude  # Test in fork first
 
+# Wait for fork CI to pass ✅
+
+# Step 2: After fork PR merges and CI is green, create upstream PR
+git checkout main
+git pull origin main
+git push upstream main  # Or create PR from GitHub UI
+gh pr create --repo dlorenc/multiclaude
+```
+
+**✓ Checklist before creating upstream PRs:**
+- Changes tested in fork with passing CI
+- All tests green in fork
+- PR is targeted and focused (not too broad)
+- Changes work properly in fork
+
+**Why this workflow?**
+- Catches issues early in fork CI before upstream
+- Allows multiple iterations without noise upstream
+- Upstream PRs are higher quality and more likely to merge
+- Maintains good upstream repository health
+
+### Direct Upstream Workflow (Also Acceptable)
+
+For small, well-understood changes, you can PR directly to upstream:
+
+```bash
 # Create a feature branch
 git checkout -b feature/my-change
 
@@ -210,6 +239,11 @@ git push -u origin feature/my-change
 # Create PR to upstream (via GitHub UI or gh CLI)
 gh pr create --repo dlorenc/multiclaude
 ```
+
+**Use direct upstream for:**
+- Trivial fixes (typos, formatting)
+- Well-tested, focused changes
+- Changes you're confident about
 
 ### Upstreaming Multiple Changes
 
