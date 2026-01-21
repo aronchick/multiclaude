@@ -102,12 +102,13 @@ func (d *Daemon) Start() error {
 	d.restoreTrackedRepos()
 
 	// Start core loops after restore completes
-	d.wg.Add(5)
+	d.wg.Add(6)
 	go d.healthCheckLoop()
 	go d.messageRouterLoop()
 	go d.wakeLoop()
 	go d.serverLoop()
 	go d.worktreeRefreshLoop()
+	go d.forkUpstreamSyncLoop()
 
 	return nil
 }
@@ -579,6 +580,146 @@ func (d *Daemon) refreshWorktrees() {
 // TriggerWorktreeRefresh triggers an immediate worktree refresh (for testing)
 func (d *Daemon) TriggerWorktreeRefresh() {
 	d.refreshWorktrees()
+}
+
+// forkUpstreamSyncLoop periodically checks fork/upstream sync status
+func (d *Daemon) forkUpstreamSyncLoop() {
+	defer d.wg.Done()
+	d.logger.Info("Starting fork upstream sync loop")
+
+	// Run every 30 minutes
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+
+	// Run once after a short delay on startup (respecting context cancellation)
+	select {
+	case <-time.After(1 * time.Minute):
+		d.checkForkUpstreamSync()
+	case <-d.ctx.Done():
+		d.logger.Info("Fork upstream sync loop stopped")
+		return
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			d.checkForkUpstreamSync()
+		case <-d.ctx.Done():
+			d.logger.Info("Fork upstream sync loop stopped")
+			return
+		}
+	}
+}
+
+// checkForkUpstreamSync checks fork CI status, upstream CI status, and divergence count
+func (d *Daemon) checkForkUpstreamSync() {
+	d.logger.Debug("Checking fork/upstream sync status")
+
+	repos := d.state.GetAllRepos()
+	for repoName, repo := range repos {
+		repoPath := d.paths.RepoDir(repoName)
+
+		// Check if repo path exists
+		if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+			continue
+		}
+
+		wt := worktree.NewManager(repoPath)
+
+		// Get the upstream remote
+		remote, err := wt.GetUpstreamRemote()
+		if err != nil {
+			d.logger.Debug("Could not get remote for %s: %v", repoName, err)
+			continue
+		}
+
+		// Get the default branch
+		mainBranch, err := wt.GetDefaultBranch(remote)
+		if err != nil {
+			d.logger.Debug("Could not get default branch for %s: %v", repoName, err)
+			continue
+		}
+
+		// Fetch from remote to have latest state
+		if err := wt.FetchRemote(remote); err != nil {
+			d.logger.Debug("Could not fetch from remote for %s: %v", repoName, err)
+			continue
+		}
+
+		// Check divergence count between local main and upstream main
+		divergence, err := d.getDivergenceCount(repoPath, mainBranch, remote)
+		if err != nil {
+			d.logger.Debug("Could not get divergence count for %s: %v", repoName, err)
+			continue
+		}
+
+		// Check fork CI status (local main branch)
+		forkCIStatus, err := d.getGitHubCIStatus(repo.GithubURL, mainBranch)
+		if err != nil {
+			d.logger.Debug("Could not get fork CI status for %s: %v", repoName, err)
+		}
+
+		// Check upstream CI status
+		upstreamCIStatus := "unknown"
+		if remote != "origin" {
+			upstreamURL, err := d.getRemoteURL(repoPath, remote)
+			if err == nil {
+				upstreamCIStatus, _ = d.getGitHubCIStatus(upstreamURL, mainBranch)
+			}
+		}
+
+		// Log results
+		d.logger.Info("Fork/Upstream sync for %s: fork_ci=%s, upstream_ci=%s, commits_behind=%d, commits_ahead=%d",
+			repoName, forkCIStatus, upstreamCIStatus, divergence.Behind, divergence.Ahead)
+	}
+}
+
+// Divergence represents the commit divergence between branches
+type Divergence struct {
+	Behind int
+	Ahead  int
+}
+
+// getDivergenceCount returns the number of commits the local branch is behind/ahead of upstream
+func (d *Daemon) getDivergenceCount(repoPath, branch, remote string) (Divergence, error) {
+	// Get commits behind (upstream has commits we don't)
+	cmd := exec.Command("git", "-C", repoPath, "rev-list", "--count", fmt.Sprintf("%s..%s/%s", branch, remote, branch))
+	behindOutput, err := cmd.Output()
+	if err != nil {
+		return Divergence{}, fmt.Errorf("failed to count commits behind: %w", err)
+	}
+	behind := 0
+	fmt.Sscanf(strings.TrimSpace(string(behindOutput)), "%d", &behind)
+
+	// Get commits ahead (we have commits upstream doesn't)
+	cmd = exec.Command("git", "-C", repoPath, "rev-list", "--count", fmt.Sprintf("%s/%s..%s", remote, branch, branch))
+	aheadOutput, err := cmd.Output()
+	if err != nil {
+		return Divergence{}, fmt.Errorf("failed to count commits ahead: %w", err)
+	}
+	ahead := 0
+	fmt.Sscanf(strings.TrimSpace(string(aheadOutput)), "%d", &ahead)
+
+	return Divergence{Behind: behind, Ahead: ahead}, nil
+}
+
+// getRemoteURL gets the URL for a git remote
+func (d *Daemon) getRemoteURL(repoPath, remote string) (string, error) {
+	cmd := exec.Command("git", "-C", repoPath, "remote", "get-url", remote)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get remote URL: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// getGitHubCIStatus checks the CI status for a branch on GitHub
+func (d *Daemon) getGitHubCIStatus(repoURL, branch string) (string, error) {
+	// Use gh CLI to check CI status
+	// Format: gh api repos/{owner}/{repo}/commits/{branch}/check-runs
+	// For now, return "unknown" as this requires gh CLI and API access
+	// This is a placeholder for future implementation
+	return "unknown", nil
 }
 
 // handleRequest handles incoming socket requests
