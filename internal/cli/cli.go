@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,43 @@ import (
 
 // Version is the current version of multiclaude (set at build time via ldflags)
 var Version = "dev"
+
+// GetVersion returns a semver-formatted version string.
+// For release builds (Version set via ldflags), returns Version as-is.
+// For dev builds, returns "0.0.0+<commit>-dev" using VCS info from the binary.
+func GetVersion() string {
+	if Version != "dev" {
+		return Version
+	}
+
+	// Try to get VCS info embedded by Go at build time
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "0.0.0-dev"
+	}
+
+	var commit string
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" {
+			commit = setting.Value
+			if len(commit) > 7 {
+				commit = commit[:7] // Short commit hash
+			}
+			break
+		}
+	}
+
+	if commit == "" {
+		return "0.0.0-dev"
+	}
+
+	return fmt.Sprintf("0.0.0+%s-dev", commit)
+}
+
+// IsDevVersion returns true if running a development build (not set via ldflags)
+func IsDevVersion() bool {
+	return Version == "dev"
+}
 
 // Command represents a CLI command
 type Command struct {
@@ -146,7 +184,7 @@ func (c *CLI) Execute(args []string) error {
 
 // showVersion displays the version information
 func (c *CLI) showVersion() error {
-	fmt.Printf("multiclaude %s\n", Version)
+	fmt.Printf("multiclaude %s\n", GetVersion())
 	return nil
 }
 
@@ -4945,7 +4983,7 @@ func (c *CLI) bugReport(args []string) error {
 	}
 
 	// Create collector and generate report
-	collector := bugreport.NewCollector(c.paths, Version)
+	collector := bugreport.NewCollector(c.paths, GetVersion())
 	report, err := collector.Collect(description, verbose)
 	if err != nil {
 		return fmt.Errorf("failed to collect diagnostic information: %w", err)
