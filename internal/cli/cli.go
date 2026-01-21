@@ -4609,7 +4609,10 @@ func (c *CLI) restartClaude(args []string) error {
 	// Exec claude
 	claudePath := "claude"
 
-	fmt.Printf("Running: %s %s\n\n", claudePath, strings.Join(cmdArgs, " "))
+	// Set CLAUDE_CONFIG_DIR so Claude finds credentials and commands
+	agentConfigDir := filepath.Join(c.paths.ClaudeConfigDir, repoName, agentName)
+
+	fmt.Printf("Running: CLAUDE_CONFIG_DIR=%s %s %s\n\n", agentConfigDir, claudePath, strings.Join(cmdArgs, " "))
 
 	// Run claude interactively
 	cmd := exec.Command(claudePath, cmdArgs...)
@@ -4617,6 +4620,7 @@ func (c *CLI) restartClaude(args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = agent.WorktreePath
+	cmd.Env = append(os.Environ(), fmt.Sprintf("CLAUDE_CONFIG_DIR=%s", agentConfigDir))
 
 	return cmd.Run()
 }
@@ -4922,9 +4926,9 @@ func (c *CLI) bugReport(args []string) error {
 	return nil
 }
 
-// linkGlobalCredentials creates a symlink from the Claude config directory's .credentials.json
-// to the global ~/.claude/.credentials.json. This ensures workers can access OAuth
-// credentials without duplicating sensitive files.
+// linkGlobalCredentials copies credentials from ~/.claude/.credentials.json
+// to the Claude config directory. We copy instead of symlink because Claude Code
+// cannot read symlinked credentials on startup.
 //
 // When CLAUDE_CONFIG_DIR is set, Claude looks for credentials there, not in the
 // project's .claude directory or the global ~/.claude directory.
@@ -4948,28 +4952,25 @@ func (c *CLI) linkGlobalCredentials(claudeConfigDir string) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// Check if symlink already exists and is valid
-	if linkTarget, err := os.Readlink(localCredFile); err == nil {
-		if linkTarget == globalCredFile {
-			// Already correctly linked
-			return nil
-		}
-		// Invalid link, remove it
-		os.Remove(localCredFile)
-	} else if _, err := os.Stat(localCredFile); err == nil {
-		// File exists but is not a symlink, remove it
-		os.Remove(localCredFile)
+	// Read the global credentials
+	credData, err := os.ReadFile(globalCredFile)
+	if err != nil {
+		return fmt.Errorf("failed to read global credentials: %w", err)
 	}
 
-	// Create symlink
-	if err := os.Symlink(globalCredFile, localCredFile); err != nil {
-		return fmt.Errorf("failed to create credentials symlink: %w", err)
+	// Remove any existing file or symlink
+	os.Remove(localCredFile)
+
+	// Copy credentials file instead of symlinking
+	// Claude Code cannot read symlinked credentials on startup, so we must copy the file
+	if err := os.WriteFile(localCredFile, credData, 0600); err != nil {
+		return fmt.Errorf("failed to write credentials file: %w", err)
 	}
 
 	return nil
 }
 
-// repairCredentials fixes CLAUDE_CONFIG_DIR directories that are missing credential symlinks
+// repairCredentials copies credentials to CLAUDE_CONFIG_DIR directories that are missing them
 func (c *CLI) repairCredentials(verbose bool) (int, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -5018,36 +5019,28 @@ func (c *CLI) repairCredentials(verbose bool) (int, error) {
 			agentConfigDir := filepath.Join(repoConfigDir, entry.Name())
 			localCredFile := filepath.Join(agentConfigDir, ".credentials.json")
 
-			// Check if credentials already exist and are a valid symlink
-			if linkTarget, err := os.Readlink(localCredFile); err == nil {
-				if linkTarget == globalCredFile {
-					// Already correctly linked
-					continue
-				}
-				// Invalid symlink, will be recreated below
+			// Remove any existing symlinks (from old behavior) or outdated files
+			if _, err := os.Lstat(localCredFile); err == nil {
 				os.Remove(localCredFile)
-			} else if _, err := os.Stat(localCredFile); err == nil {
-				// File exists but is not a symlink, remove it
+			}
+
+			// Copy credentials instead of symlinking
+			// Claude Code cannot read symlinked credentials on startup
+			credData, err := os.ReadFile(globalCredFile)
+			if err != nil {
 				if verbose {
-					fmt.Printf("  Removing non-symlink credential file in %s/%s\n", repoName, entry.Name())
-				}
-				os.Remove(localCredFile)
-			} else if !os.IsNotExist(err) {
-				// Some other error
-				if verbose {
-					fmt.Printf("  Warning: failed to check credentials in %s/%s: %v\n", repoName, entry.Name(), err)
+					fmt.Printf("  Warning: failed to read global credentials: %v\n", err)
 				}
 				continue
 			}
 
-			// Create or recreate symlink
-			if err := os.Symlink(globalCredFile, localCredFile); err != nil {
+			if err := os.WriteFile(localCredFile, credData, 0600); err != nil {
 				if verbose {
-					fmt.Printf("  Warning: failed to link credentials in %s/%s: %v\n", repoName, entry.Name(), err)
+					fmt.Printf("  Warning: failed to copy credentials in %s/%s: %v\n", repoName, entry.Name(), err)
 				}
 			} else {
 				if verbose {
-					fmt.Printf("  Linked credentials in %s/%s\n", repoName, entry.Name())
+					fmt.Printf("  Copied credentials in %s/%s\n", repoName, entry.Name())
 				}
 				fixed++
 			}
