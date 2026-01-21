@@ -596,6 +596,125 @@ func CleanupOrphaned(wtRootDir string, manager *Manager) ([]string, error) {
 	return removed, nil
 }
 
+// WorktreeState represents the current state of a worktree
+type WorktreeState struct {
+	Path            string
+	Branch          string
+	IsDetachedHEAD  bool
+	IsMidRebase     bool
+	IsMidMerge      bool
+	HasUncommitted  bool
+	CommitsBehind   int  // Number of commits behind remote main
+	CommitsAhead    int  // Number of commits ahead of remote main
+	CanRefresh      bool // True if worktree is in a state that can be safely refreshed
+	RefreshReason   string
+}
+
+// GetWorktreeState checks the current state of a worktree and whether it can be safely refreshed
+func GetWorktreeState(worktreePath string, remote string, mainBranch string) (WorktreeState, error) {
+	state := WorktreeState{
+		Path:       worktreePath,
+		CanRefresh: true,
+	}
+
+	// Get current branch (or detect detached HEAD)
+	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
+	cmd.Dir = worktreePath
+	output, err := cmd.Output()
+	if err != nil {
+		// Check if it's detached HEAD (different error than not being a git repo)
+		cmd2 := exec.Command("git", "rev-parse", "--verify", "HEAD")
+		cmd2.Dir = worktreePath
+		if err2 := cmd2.Run(); err2 != nil {
+			return state, fmt.Errorf("not a git repository or invalid state: %w", err)
+		}
+		state.IsDetachedHEAD = true
+		state.CanRefresh = false
+		state.RefreshReason = "detached HEAD"
+	} else {
+		state.Branch = strings.TrimSpace(string(output))
+	}
+
+	// Check for mid-rebase state
+	gitDir := filepath.Join(worktreePath, ".git")
+	// For worktrees, .git is a file pointing to the real git dir
+	if content, err := os.ReadFile(gitDir); err == nil && strings.HasPrefix(string(content), "gitdir:") {
+		gitDir = strings.TrimSpace(strings.TrimPrefix(string(content), "gitdir:"))
+	}
+	rebaseDir := filepath.Join(gitDir, "rebase-merge")
+	rebaseApplyDir := filepath.Join(gitDir, "rebase-apply")
+	if _, err := os.Stat(rebaseDir); err == nil {
+		state.IsMidRebase = true
+		state.CanRefresh = false
+		state.RefreshReason = "mid-rebase"
+	} else if _, err := os.Stat(rebaseApplyDir); err == nil {
+		state.IsMidRebase = true
+		state.CanRefresh = false
+		state.RefreshReason = "mid-rebase"
+	}
+
+	// Check for mid-merge state
+	mergeHead := filepath.Join(gitDir, "MERGE_HEAD")
+	if _, err := os.Stat(mergeHead); err == nil {
+		state.IsMidMerge = true
+		state.CanRefresh = false
+		state.RefreshReason = "mid-merge"
+	}
+
+	// Check for uncommitted changes
+	hasChanges, err := HasUncommittedChanges(worktreePath)
+	if err == nil {
+		state.HasUncommitted = hasChanges
+	}
+
+	// Skip commit count checks if we can't refresh anyway
+	if !state.CanRefresh {
+		return state, nil
+	}
+
+	// Check if on main branch (shouldn't refresh main)
+	if state.Branch == mainBranch || state.Branch == "main" || state.Branch == "master" {
+		state.CanRefresh = false
+		state.RefreshReason = "on main branch"
+		return state, nil
+	}
+
+	// Check commits behind/ahead of remote main
+	cmd = exec.Command("git", "rev-list", "--left-right", "--count", fmt.Sprintf("%s/%s...HEAD", remote, mainBranch))
+	cmd.Dir = worktreePath
+	output, err = cmd.Output()
+	if err != nil {
+		// If we can't check, assume we can't safely auto-refresh
+		state.CanRefresh = false
+		state.RefreshReason = fmt.Sprintf("could not check remote status: %v", err)
+		return state, nil
+	}
+
+	// Parse output like "3\t5" (behind\tahead)
+	parts := strings.Fields(strings.TrimSpace(string(output)))
+	if len(parts) == 2 {
+		fmt.Sscanf(parts[0], "%d", &state.CommitsBehind)
+		fmt.Sscanf(parts[1], "%d", &state.CommitsAhead)
+	}
+
+	// If not behind, no need to refresh
+	if state.CommitsBehind == 0 {
+		state.CanRefresh = false
+		state.RefreshReason = "already up to date"
+	}
+
+	return state, nil
+}
+
+// IsBehindMain checks if a worktree is behind the remote main branch
+func IsBehindMain(worktreePath string, remote string, mainBranch string) (bool, int, error) {
+	state, err := GetWorktreeState(worktreePath, remote, mainBranch)
+	if err != nil {
+		return false, 0, err
+	}
+	return state.CommitsBehind > 0, state.CommitsBehind, nil
+}
+
 // RefreshResult contains the result of a worktree refresh operation
 type RefreshResult struct {
 	WorktreePath    string
@@ -618,12 +737,50 @@ func RefreshWorktree(worktreePath string, remote string, mainBranch string) Refr
 		WorktreePath: worktreePath,
 	}
 
-	// Get current branch
-	branch, err := GetCurrentBranch(worktreePath)
+	// Check for detached HEAD, mid-rebase, or mid-merge states
+	// These must be resolved before we can safely refresh
+	gitDir := filepath.Join(worktreePath, ".git")
+	// For worktrees, .git is a file pointing to the real git dir
+	if content, err := os.ReadFile(gitDir); err == nil && strings.HasPrefix(string(content), "gitdir:") {
+		gitDir = strings.TrimSpace(strings.TrimPrefix(string(content), "gitdir:"))
+	}
+
+	// Check for mid-rebase state
+	if _, err := os.Stat(filepath.Join(gitDir, "rebase-merge")); err == nil {
+		result.Skipped = true
+		result.SkipReason = "mid-rebase (run 'git rebase --continue' or 'git rebase --abort')"
+		return result
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "rebase-apply")); err == nil {
+		result.Skipped = true
+		result.SkipReason = "mid-rebase (run 'git rebase --continue' or 'git rebase --abort')"
+		return result
+	}
+
+	// Check for mid-merge state
+	if _, err := os.Stat(filepath.Join(gitDir, "MERGE_HEAD")); err == nil {
+		result.Skipped = true
+		result.SkipReason = "mid-merge (run 'git merge --continue' or 'git merge --abort')"
+		return result
+	}
+
+	// Get current branch (also detects detached HEAD)
+	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
+	cmd.Dir = worktreePath
+	output, err := cmd.Output()
 	if err != nil {
+		// Check if it's detached HEAD vs not a git repo
+		cmd2 := exec.Command("git", "rev-parse", "--verify", "HEAD")
+		cmd2.Dir = worktreePath
+		if cmd2.Run() == nil {
+			result.Skipped = true
+			result.SkipReason = "detached HEAD (checkout a branch first)"
+			return result
+		}
 		result.Error = fmt.Errorf("failed to get current branch: %w", err)
 		return result
 	}
+	branch := strings.TrimSpace(string(output))
 	result.Branch = branch
 
 	// Don't refresh if on main branch directly
@@ -634,7 +791,7 @@ func RefreshWorktree(worktreePath string, remote string, mainBranch string) Refr
 	}
 
 	// Fetch latest from remote
-	cmd := exec.Command("git", "fetch", remote, mainBranch)
+	cmd = exec.Command("git", "fetch", remote, mainBranch)
 	cmd.Dir = worktreePath
 	if output, err := cmd.CombinedOutput(); err != nil {
 		result.Error = fmt.Errorf("failed to fetch from %s: %w\nOutput: %s", remote, err, output)
