@@ -427,6 +427,14 @@ func (c *CLI) registerCommands() {
 
 	c.rootCmd.Subcommands["workspace"] = workspaceCmd
 
+	// Refresh command (top-level for convenience)
+	c.rootCmd.Subcommands["refresh"] = &Command{
+		Name:        "refresh",
+		Description: "Sync worktree with main branch",
+		Usage:       "multiclaude refresh [--repo <repo>] [--all]",
+		Run:         c.refreshWorktrees,
+	}
+
 	// History command
 	c.rootCmd.Subcommands["history"] = &Command{
 		Name:        "history",
@@ -2791,6 +2799,150 @@ func validateWorkspaceName(name string) error {
 		if strings.Contains(name, char) {
 			return fmt.Errorf("workspace name cannot contain '%s'", char)
 		}
+	}
+
+	return nil
+}
+
+// refreshWorktrees syncs worktrees with the main branch
+func (c *CLI) refreshWorktrees(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	// Determine repository
+	repoName, ok := flags["repo"]
+	if !ok {
+		// Try to infer from cwd
+		inferred, err := c.inferRepoFromCwd()
+		if err != nil {
+			return errors.InvalidUsage("could not determine repository. Use --repo or run from within a multiclaude workspace")
+		}
+		repoName = inferred
+	}
+
+	// Check if daemon is running
+	client := socket.NewClient(c.paths.DaemonSock)
+	_, err := client.Send(socket.Request{Command: "ping"})
+	if err != nil {
+		return errors.DaemonNotRunning()
+	}
+
+	// Get the repository path
+	repoPath := c.paths.RepoDir(repoName)
+	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+		return fmt.Errorf("repository '%s' not found at %s", repoName, repoPath)
+	}
+
+	// Get list of agents to refresh
+	resp, err := client.Send(socket.Request{
+		Command: "list_agents",
+		Args: map[string]interface{}{
+			"repo": repoName,
+		},
+	})
+	if err != nil {
+		return errors.DaemonCommunicationFailed("listing agents", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("failed to list agents: %s", resp.Error)
+	}
+
+	agents, _ := resp.Data.([]interface{})
+
+	// Filter for agents with worktrees (workers and workspaces)
+	refreshAll := flags["all"] == "true"
+
+	// Create worktree manager
+	wt := worktree.NewManager(repoPath)
+
+	// Get remote and main branch info once
+	remote, err := wt.GetUpstreamRemote()
+	if err != nil {
+		return fmt.Errorf("failed to get remote: %w", err)
+	}
+
+	mainBranch, err := wt.GetDefaultBranch(remote)
+	if err != nil {
+		return fmt.Errorf("failed to get default branch: %w", err)
+	}
+
+	fmt.Printf("Refreshing worktrees in '%s' from %s/%s\n\n", repoName, remote, mainBranch)
+
+	// Fetch once for all worktrees
+	fmt.Printf("Fetching from %s...\n", remote)
+	if err := wt.FetchRemote(remote); err != nil {
+		return fmt.Errorf("failed to fetch: %w", err)
+	}
+
+	var refreshed, skipped, failed int
+
+	for _, agent := range agents {
+		agentMap, ok := agent.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		agentType, _ := agentMap["type"].(string)
+		agentName, _ := agentMap["name"].(string)
+		wtPath, _ := agentMap["worktree_path"].(string)
+
+		// Skip agents without worktrees (supervisor, merge-queue)
+		if wtPath == "" {
+			continue
+		}
+
+		// If not --all, only refresh the current worktree (if we're in one)
+		if !refreshAll {
+			cwd, _ := os.Getwd()
+			// Check if cwd is within this worktree
+			if !strings.HasPrefix(cwd, wtPath) {
+				continue
+			}
+		}
+
+		fmt.Printf("  %s (%s): ", agentName, agentType)
+
+		result := worktree.RefreshWorktree(wtPath, remote, mainBranch)
+
+		if result.Skipped {
+			fmt.Printf("skipped (%s)\n", result.SkipReason)
+			skipped++
+			continue
+		}
+
+		if result.Error != nil {
+			if result.HasConflicts {
+				fmt.Printf("conflicts in %d files (rebase aborted)\n", len(result.ConflictFiles))
+			} else {
+				fmt.Printf("error: %v\n", result.Error)
+			}
+			failed++
+			continue
+		}
+
+		status := "up to date"
+		if result.CommitsRebased > 0 {
+			status = fmt.Sprintf("rebased %d commits", result.CommitsRebased)
+		}
+		if result.WasStashed {
+			if result.StashRestored {
+				status += " (changes restored)"
+			} else {
+				status += " (changes stashed)"
+			}
+		}
+		fmt.Printf("%s\n", status)
+		refreshed++
+	}
+
+	fmt.Println()
+	if refreshAll {
+		fmt.Printf("Refreshed: %d, Skipped: %d, Failed: %d\n", refreshed, skipped, failed)
+	} else if refreshed == 0 && failed == 0 {
+		fmt.Println("No worktrees refreshed. Use --all to refresh all agent worktrees.")
+	}
+
+	if failed > 0 {
+		return fmt.Errorf("%d worktree(s) failed to refresh", failed)
 	}
 
 	return nil
