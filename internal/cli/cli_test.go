@@ -2194,3 +2194,4 @@ func TestSanitizeTmuxSessionName(t *testing.T) {
 		})
 	}
 }
+
