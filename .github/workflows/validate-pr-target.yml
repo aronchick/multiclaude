@@ -1,0 +1,180 @@
+name: Validate PR Target
+
+# This workflow ensures that PRs from forks target the upstream repository correctly
+# It runs on all PRs and validates:
+# 1. Fork PRs target upstream (not the fork itself)
+# 2. Non-fork PRs target the correct base repository
+# 3. Base branch is appropriate (main/master)
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate-target:
+    name: Validate PR Repository Target
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history to check remotes
+
+      - name: Fetch upstream remote if exists
+        id: detect-fork
+        run: |
+          # Try to detect if this is a fork by checking upstream remote
+          if git ls-remote --exit-code upstream > /dev/null 2>&1; then
+            echo "is_fork=true" >> $GITHUB_OUTPUT
+            echo "Detected fork workflow"
+          else
+            echo "is_fork=false" >> $GITHUB_OUTPUT
+            echo "Not a fork workflow"
+          fi
+
+      - name: Get repository information
+        id: repo-info
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Get PR information
+          PR_BASE_REPO="${{ github.event.pull_request.base.repo.full_name }}"
+          PR_HEAD_REPO="${{ github.event.pull_request.head.repo.full_name }}"
+          PR_BASE_REF="${{ github.event.pull_request.base.ref }}"
+          PR_HEAD_REF="${{ github.event.pull_request.head.ref }}"
+
+          echo "pr_base_repo=$PR_BASE_REPO" >> $GITHUB_OUTPUT
+          echo "pr_head_repo=$PR_HEAD_REPO" >> $GITHUB_OUTPUT
+          echo "pr_base_ref=$PR_BASE_REF" >> $GITHUB_OUTPUT
+          echo "pr_head_ref=$PR_HEAD_REF" >> $GITHUB_OUTPUT
+
+          echo "PR Information:"
+          echo "  Base: $PR_BASE_REPO ($PR_BASE_REF)"
+          echo "  Head: $PR_HEAD_REPO ($PR_HEAD_REF)"
+
+          # Get parent repository (if this is a fork)
+          if [ "${{ github.event.pull_request.base.repo.fork }}" = "true" ]; then
+            PARENT_REPO="${{ github.event.pull_request.base.repo.parent.full_name }}"
+            echo "parent_repo=$PARENT_REPO" >> $GITHUB_OUTPUT
+            echo "  Parent: $PARENT_REPO"
+          else
+            echo "parent_repo=" >> $GITHUB_OUTPUT
+            echo "  Not a fork"
+          fi
+
+      - name: Validate PR target (Fork workflow)
+        if: github.event.pull_request.head.repo.fork == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_REPO: ${{ steps.repo-info.outputs.pr_base_repo }}
+          PR_HEAD_REPO: ${{ steps.repo-info.outputs.pr_head_repo }}
+          PARENT_REPO: ${{ steps.repo-info.outputs.parent_repo }}
+        run: |
+          echo "Validating fork PR targeting..."
+
+          # Check if PR is targeting the base repository (not another fork)
+          if [ "$PR_BASE_REPO" = "$PR_HEAD_REPO" ]; then
+            echo "::error::PR is targeting the fork itself, not the upstream repository"
+            echo "This PR targets the fork ($PR_BASE_REPO) instead of upstream."
+            echo "Please close this PR and create a new one targeting the upstream repository."
+            exit 1
+          fi
+
+          # If there's a parent repository, ensure we're targeting it
+          if [ -n "$PARENT_REPO" ] && [ "$PR_BASE_REPO" != "$PARENT_REPO" ]; then
+            echo "::warning::PR may be targeting an unexpected repository"
+            echo "Expected: $PARENT_REPO"
+            echo "Actual: $PR_BASE_REPO"
+            # Don't fail, just warn - there might be valid reasons
+          fi
+
+          echo "✅ Fork PR targeting is correct"
+
+      - name: Validate base branch
+        env:
+          PR_BASE_REF: ${{ steps.repo-info.outputs.pr_base_ref }}
+        run: |
+          echo "Validating base branch: $PR_BASE_REF"
+
+          # Check if base branch is main or master
+          if [[ "$PR_BASE_REF" != "main" && "$PR_BASE_REF" != "master" ]]; then
+            echo "::warning::PR targets unusual base branch: $PR_BASE_REF"
+            echo "Most PRs should target 'main' or 'master'"
+          else
+            echo "✅ Base branch is valid: $PR_BASE_REF"
+          fi
+
+      - name: Check multiclaude label
+        if: contains(github.event.pull_request.head.ref, 'multiclaude/') || contains(github.event.pull_request.head.ref, 'work/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "Checking for multiclaude label on agent-created PR..."
+
+          # Check if PR has multiclaude label
+          LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name')
+
+          if echo "$LABELS" | grep -q "multiclaude"; then
+            echo "✅ PR has multiclaude label"
+          else
+            echo "::warning::PR appears to be from a multiclaude agent but lacks 'multiclaude' label"
+            echo "Adding multiclaude label..."
+
+            # Auto-add the label
+            gh pr edit $PR_NUMBER --add-label "multiclaude" || echo "::warning::Failed to add label"
+          fi
+
+      - name: Add validation comment (on failure)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_REPO: ${{ steps.repo-info.outputs.pr_base_repo }}
+          PR_HEAD_REPO: ${{ steps.repo-info.outputs.pr_head_repo }}
+        run: |
+          # Get upstream repository (if this is a fork)
+          UPSTREAM_REPO="${{ steps.repo-info.outputs.parent_repo }}"
+
+          if [ -n "$UPSTREAM_REPO" ]; then
+            gh pr comment $PR_NUMBER --body "## ❌ PR Target Validation Failed
+
+This PR is targeting the wrong repository.
+
+**Current target:** $PR_BASE_REPO (your fork)
+**Should target:** $UPSTREAM_REPO (upstream)
+
+### To Fix
+
+1. Close this PR
+2. Create a new PR targeting upstream:
+
+\`\`\`bash
+gh pr create \\
+  --repo $UPSTREAM_REPO \\
+  --base main \\
+  --title \"${{ github.event.pull_request.title }}\" \\
+  --body \"...\" \\
+  --label \"multiclaude\"
+\`\`\`
+
+See [configuring-fork-pr-targeting.md](docs/configuring-fork-pr-targeting.md) for more information.
+" || echo "Failed to add comment"
+          fi
+
+      - name: Validation summary
+        if: success()
+        run: |
+          echo "✅ All PR target validations passed"
+          echo ""
+          echo "Summary:"
+          echo "  - Base repo: ${{ steps.repo-info.outputs.pr_base_repo }}"
+          echo "  - Base ref: ${{ steps.repo-info.outputs.pr_base_ref }}"
+          echo "  - Head repo: ${{ steps.repo-info.outputs.pr_head_repo }}"
+          echo "  - Head ref: ${{ steps.repo-info.outputs.pr_head_ref }}"

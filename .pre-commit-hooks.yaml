@@ -1,0 +1,12 @@
+---
+# Pre-commit hooks for multiclaude
+# See https://pre-commit.com for more information
+
+- id: validate-pr-target
+  name: Validate PR Target
+  description: Ensures PRs from forks target the upstream repository
+  entry: scripts/validate-pr-target.sh
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [manual]

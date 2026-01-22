@@ -1,0 +1,33 @@
+# Example .pre-commit-config.yaml
+# Copy this to your repository root as .pre-commit-config.yaml to enable PR target validation
+#
+# Installation:
+# 1. Install pre-commit: pip install pre-commit
+# 2. Copy this file to .pre-commit-config.yaml in your repo root
+# 3. Install hooks: pre-commit install
+#
+# Usage:
+# Run manually before creating a PR:
+#   pre-commit run validate-pr-target --hook-stage manual
+
+repos:
+  - repo: local
+    hooks:
+      - id: validate-pr-target
+        name: Validate PR Target
+        entry: scripts/validate-pr-target.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [manual]
+
+# You can also add other useful hooks:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
