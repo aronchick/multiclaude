@@ -2412,7 +2412,10 @@ func (d *Daemon) forkUpstreamSyncLoop() {
 	defer ticker.Stop()
 
 	// Run once immediately on startup (after a short delay to let things settle)
-	time.Sleep(1 * time.Minute)
+	// Skip the delay in test mode to avoid test timeouts
+	if os.Getenv("MULTICLAUDE_TEST_MODE") != "1" {
+		time.Sleep(1 * time.Minute)
+	}
 	d.checkForkUpstreamStatus()
 
 	for {

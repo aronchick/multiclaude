@@ -98,6 +98,10 @@ func TestCorruptedStateFileRecovery(t *testing.T) {
 
 // TestOrphanedTmuxSessionCleanup tests that orphaned tmux sessions are detected
 func TestOrphanedTmuxSessionCleanup(t *testing.T) {
+	// Set test mode to skip delays and Claude startup
+	os.Setenv("MULTICLAUDE_TEST_MODE", "1")
+	defer os.Unsetenv("MULTICLAUDE_TEST_MODE")
+
 	tmuxClient := tmux.NewClient()
 	if !tmuxClient.IsTmuxAvailable() {
 		t.Skip("tmux not available")
@@ -251,6 +255,10 @@ func TestOrphanedWorktreeCleanup(t *testing.T) {
 
 // TestStaleSocketCleanup tests that stale socket files are cleaned up
 func TestStaleSocketCleanup(t *testing.T) {
+	// Set test mode to skip delays and Claude startup
+	os.Setenv("MULTICLAUDE_TEST_MODE", "1")
+	defer os.Unsetenv("MULTICLAUDE_TEST_MODE")
+
 	tmpDir := t.TempDir()
 	paths := &config.Paths{
 		Root:            tmpDir,
@@ -359,6 +367,10 @@ func TestOrphanedMessageDirectoryCleanup(t *testing.T) {
 
 // TestDaemonCrashRecovery tests that the system can recover from a daemon crash
 func TestDaemonCrashRecovery(t *testing.T) {
+	// Set test mode to skip delays and Claude startup
+	os.Setenv("MULTICLAUDE_TEST_MODE", "1")
+	defer os.Unsetenv("MULTICLAUDE_TEST_MODE")
+
 	// This test requires tmux because the daemon's restoreTrackedRepos() checks
 	// for tmux session existence. If the session doesn't exist, it tries to restore
 	// agents which would clear/recreate them. We need the session to exist so
