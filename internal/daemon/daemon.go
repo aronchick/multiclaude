@@ -2287,7 +2287,7 @@ func (d *Daemon) handleStartDashboard(req socket.Request) socket.Response {
 	msgMgr := messages.NewManager(d.paths.MessagesDir)
 
 	// Create and start dashboard server
-	d.dashboardServer = dashboard.NewServer(d.state, msgMgr, d.logger)
+	d.dashboardServer = dashboard.NewServer(d.state, msgMgr)
 
 	// Start in goroutine
 	d.wg.Add(1)
