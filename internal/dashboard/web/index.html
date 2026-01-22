@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>multiclaude Dashboard</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <header>
+        <h1>🤖 multiclaude Dashboard</h1>
+        <div class="header-info">
+            <span class="fork-badge">FORK-ONLY FEATURE</span>
+            <span id="live-indicator" class="live-indicator">
+                <span class="dot"></span>
+                <span class="text">Live</span>
+            </span>
+            <span id="last-update">Last update: Never</span>
+        </div>
+    </header>
+
+    <main>
+        <section class="overview">
+            <h2>Overview</h2>
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-value" id="total-repos">0</div>
+                    <div class="stat-label">Repositories</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="total-agents">0</div>
+                    <div class="stat-label">Active Agents</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="total-workers">0</div>
+                    <div class="stat-label">Workers</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="repositories">
+            <h2>Repositories</h2>
+            <div id="repos-list" class="repos-list">
+                <p class="loading">Loading repositories...</p>
+            </div>
+        </section>
+
+        <section class="recent-activity">
+            <h2>Recent Task History</h2>
+            <div id="history-list" class="history-list">
+                <p class="loading">Loading task history...</p>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>
+            multiclaude-web |
+            <a href="https://github.com/aronchick/multiclaude" target="_blank">aronchick/multiclaude</a> fork |
+            Read-only dashboard
+        </p>
+    </footer>
+
+    <script src="/app.js"></script>
+</body>
+</html>
