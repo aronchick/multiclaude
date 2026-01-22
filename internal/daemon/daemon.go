@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dlorenc/multiclaude/internal/dashboard"
 	"github.com/dlorenc/multiclaude/internal/events"
 	"github.com/dlorenc/multiclaude/internal/hooks"
 	"github.com/dlorenc/multiclaude/internal/logging"
@@ -27,14 +28,15 @@ import (
 
 // Daemon represents the main daemon process
 type Daemon struct {
-	paths        *config.Paths
-	state        *state.State
-	tmux         *tmux.Client
-	logger       *logging.Logger
-	server       *socket.Server
-	pidFile      *PIDFile
-	claudeRunner *claude.Runner
-	eventBus     *events.Bus
+	paths          *config.Paths
+	state          *state.State
+	tmux           *tmux.Client
+	logger         *logging.Logger
+	server         *socket.Server
+	dashboardServer *dashboard.Server
+	pidFile        *PIDFile
+	claudeRunner   *claude.Runner
+	eventBus       *events.Bus
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -675,6 +677,15 @@ func (d *Daemon) handleRequest(req socket.Request) socket.Response {
 
 	case "task_history":
 		return d.handleTaskHistory(req)
+
+	case "start_dashboard":
+		return d.handleStartDashboard(req)
+
+	case "stop_dashboard":
+		return d.handleStopDashboard(req)
+
+	case "dashboard_status":
+		return d.handleDashboardStatus(req)
 
 	default:
 		return socket.Response{
@@ -2264,4 +2275,63 @@ func (d *Daemon) handleUpdateHookConfig(req socket.Request) socket.Response {
 
 	d.logger.Info("Updated hook configuration")
 	return socket.Response{Success: true}
+}
+
+// handleStartDashboard starts the dashboard HTTP server
+func (d *Daemon) handleStartDashboard(req socket.Request) socket.Response {
+	if d.dashboardServer != nil {
+		return socket.Response{Success: false, Error: "Dashboard is already running"}
+	}
+
+	// Create message manager
+	msgMgr := messages.NewManager(d.paths.MessagesDir)
+
+	// Create and start dashboard server
+	d.dashboardServer = dashboard.NewServer(d.state, msgMgr, d.logger)
+
+	// Start in goroutine
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		if err := d.dashboardServer.Start(d.ctx); err != nil {
+			d.logger.Error("Dashboard server error: %v", err)
+			d.dashboardServer = nil
+		}
+	}()
+
+	d.logger.Info("Dashboard HTTP server started on http://127.0.0.1:8080")
+	return socket.Response{
+		Success: true,
+		Data: map[string]interface{}{
+			"url": "http://127.0.0.1:8080",
+		},
+	}
+}
+
+// handleStopDashboard stops the dashboard HTTP server
+func (d *Daemon) handleStopDashboard(req socket.Request) socket.Response {
+	if d.dashboardServer == nil {
+		return socket.Response{Success: false, Error: "Dashboard is not running"}
+	}
+
+	if err := d.dashboardServer.Stop(); err != nil {
+		return socket.Response{Success: false, Error: fmt.Sprintf("Failed to stop dashboard: %v", err)}
+	}
+
+	d.dashboardServer = nil
+	d.logger.Info("Dashboard HTTP server stopped")
+	return socket.Response{Success: true}
+}
+
+// handleDashboardStatus returns dashboard server status
+func (d *Daemon) handleDashboardStatus(req socket.Request) socket.Response {
+	running := d.dashboardServer != nil
+
+	return socket.Response{
+		Success: true,
+		Data: map[string]interface{}{
+			"running": running,
+			"url":     "http://127.0.0.1:8080",
+		},
+	}
 }

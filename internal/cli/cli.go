@@ -532,6 +532,14 @@ func (c *CLI) registerCommands() {
 		Run:         c.configRepo,
 	}
 
+	// Dashboard command
+	c.rootCmd.Subcommands["dashboard"] = &Command{
+		Name:        "dashboard",
+		Description: "Start the web dashboard (fork-only feature)",
+		Usage:       "multiclaude dashboard [--stop]",
+		Run:         c.dashboard,
+	}
+
 	// Bug report command
 	c.rootCmd.Subcommands["bug"] = &Command{
 		Name:        "bug",
@@ -4908,6 +4916,77 @@ func (c *CLI) startClaudeInTmux(binaryPath, tmuxSession, tmuxWindow, workDir, se
 	}
 
 	return pid, nil
+}
+
+// dashboard starts or stops the web dashboard HTTP server
+func (c *CLI) dashboard(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	client := socket.NewClient(c.paths.DaemonSock)
+
+	// Check if --stop flag is provided
+	if flags["stop"] == "true" {
+		resp, err := client.Send(socket.Request{
+			Command: "stop_dashboard",
+		})
+		if err != nil {
+			return fmt.Errorf("failed to send stop_dashboard command: %w", err)
+		}
+
+		if !resp.Success {
+			return fmt.Errorf("failed to stop dashboard: %s", resp.Error)
+		}
+
+		fmt.Println("Dashboard stopped successfully")
+		return nil
+	}
+
+	// Check current dashboard status
+	statusResp, err := client.Send(socket.Request{
+		Command: "dashboard_status",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to check dashboard status: %w", err)
+	}
+
+	if statusResp.Success {
+		if statusData, ok := statusResp.Data.(map[string]interface{}); ok {
+			if running, ok := statusData["running"].(bool); ok && running {
+				url := statusData["url"].(string)
+				fmt.Printf("Dashboard is already running at %s\n", url)
+				fmt.Println("\nTo stop the dashboard, run: multiclaude dashboard --stop")
+				return nil
+			}
+		}
+	}
+
+	// Start dashboard
+	resp, err := client.Send(socket.Request{
+		Command: "start_dashboard",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to send start_dashboard command: %w", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("failed to start dashboard: %s", resp.Error)
+	}
+
+	// Extract URL from response
+	url := "http://127.0.0.1:8080"
+	if respData, ok := resp.Data.(map[string]interface{}); ok {
+		if urlStr, ok := respData["url"].(string); ok {
+			url = urlStr
+		}
+	}
+
+	fmt.Println("✓ Dashboard started successfully!")
+	fmt.Printf("\n  Open in browser: %s\n", url)
+	fmt.Println("\n  The dashboard will auto-refresh every 5 seconds.")
+	fmt.Println("  To stop the dashboard, run: multiclaude dashboard --stop")
+	fmt.Println("\n  Note: This is a fork-only feature and will not be contributed upstream.")
+
+	return nil
 }
 
 // bugReport generates a diagnostic bug report with redacted sensitive information

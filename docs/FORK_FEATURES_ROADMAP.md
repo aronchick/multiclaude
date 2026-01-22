@@ -78,121 +78,92 @@ See `examples/hooks/slack-notify.sh` for complete implementation
 
 ## 2. Web Dashboard
 
-### Status: 📋 Planned
+### Status: ✅ Implemented (PR TBD)
 
 ### Purpose
-View status of all multiclaude instances across multiple machines in a web browser.
+Read-only web dashboard for local observability of multiclaude state.
 
 ### Use Cases
-- Monitor multiple repos from one place
-- View agent activity across machines
-- Check CI status at a glance
-- Historical view of completed tasks
+- Quick visual feedback without leaving browser
+- Monitor agent status at a glance
+- View repository and agent information
+- Check system health
 
 ### Architecture
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Machine 1   │     │  Machine 2   │     │  Machine 3   │
-│              │     │              │     │              │
-│ ~/.multiclaude│    │ ~/.multiclaude│    │ ~/.multiclaude│
-│   state.json │     │   state.json │     │   state.json │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                    │
-       │                    │                    │
-       └────────────────────┼────────────────────┘
-                            │
-                            ▼
-                   ┌─────────────────┐
-                   │ multiclaude-web │
-                   │  (read-only)    │
-                   └────────┬────────┘
-                            │
-                            ▼
-                      Web Browser
+┌─────────────────────────────────────┐
+│         multiclaude daemon          │
+│                                     │
+│  ┌──────────────┐  ┌─────────────┐ │
+│  │ Unix Socket  │  │ HTTP Server │ │
+│  │ (CLI IPC)    │  │ (Dashboard) │ │
+│  └──────────────┘  └──────┬──────┘ │
+│                            │        │
+└────────────────────────────┼────────┘
+                             │
+                             ▼
+                    http://127.0.0.1:8080
+                             │
+                             ▼
+                       Web Browser
 ```
 
 ### Key Constraints
-- **Read-only**: No control plane, only viewing
-- **Optional**: Core multiclaude works without it
-- **Separate binary**: `multiclaude-web` command
-- **Local-first**: Can run on localhost or LAN
+- **Read-only**: No write operations - pure observability
+- **Localhost-only**: Binds to 127.0.0.1:8080 (not 0.0.0.0)
+- **Terminal-native remains primary**: Dashboard supplements CLI
+- **Zero new dependencies**: Uses Go stdlib only
+- **Opt-in**: Disabled by default, enabled with `multiclaude dashboard`
+- **Minimal**: ~500 lines total (server + HTML + tests)
 
-### Implementation Plan
+### Implementation Details
 
-**Phase 1: State Reader** (P0)
-- Package: `internal/dashboard/reader.go`
-- Read state.json from multiple paths
-- Aggregate data from multiple machines
-- Watch for file changes (live updates)
+**HTTP Server** (`internal/dashboard/server.go`)
+- Integrated with daemon lifecycle
+- Serves embedded HTML template
+- Provides JSON API endpoints
+- Auto-refresh every 5 seconds
 
-**Phase 2: Web Server** (P0)
-- Binary: `cmd/multiclaude-web/main.go`
-- Simple HTTP server (port 8080 default)
-- REST API for state data
-- Static file serving
+**Dashboard UI** (`internal/dashboard/templates/index.html`)
+- Single-page application
+- Vanilla JavaScript (no frameworks)
+- Dark theme matching GitHub design
+- Shows: stats, repositories, agents, activity
 
-**Phase 3: Frontend** (P1)
-- Directory: `web/`
-- Single-page app (vanilla JS or minimal framework)
-- Real-time updates via SSE or WebSocket
-- Responsive design for mobile
-
-**Phase 4: Multi-Machine** (P2)
-- SSH-based state collection
-- Configuration for remote machines
-- Aggregated view across infrastructure
-
-### Configuration Example
-
-```json
-{
-  "integrations": {
-    "web_dashboard": {
-      "enabled": true,
-      "port": 8080,
-      "bind": "127.0.0.1",
-      "machines": [
-        {
-          "name": "local",
-          "state_path": "~/.multiclaude/state.json"
-        },
-        {
-          "name": "dev-server",
-          "state_path": "ssh://dev.example.com/home/user/.multiclaude/state.json"
-        }
-      ],
-      "refresh_interval": "5s"
-    }
-  }
-}
-```
+**API Endpoints**
+- `GET /` - Dashboard HTML
+- `GET /api/status` - Overall system status
+- `GET /api/repos` - List repositories
+- `GET /api/repos/{repo}/agents` - List agents
+- `GET /api/repos/{repo}/messages` - List messages
+- `GET /api/repos/{repo}/history` - Task history
+- `GET /api/repos/{repo}/activity` - Activity feed
 
 ### Usage
 
 ```bash
-# Start web dashboard
-multiclaude-web start
+# Start dashboard
+multiclaude dashboard
 
-# Custom port
-multiclaude-web start --port 3000
-
-# Add remote machine
-multiclaude-web add-machine dev-server ssh://dev.example.com/home/user/.multiclaude/state.json
+# Stop dashboard
+multiclaude dashboard --stop
 
 # Open in browser
-multiclaude-web open
+open http://127.0.0.1:8080
 ```
 
-### Files to Create
-- `cmd/multiclaude-web/main.go` - Web server binary
-- `internal/dashboard/reader.go` - State aggregation
-- `internal/dashboard/server.go` - HTTP server
-- `internal/dashboard/api.go` - REST API handlers
-- `web/index.html` - Dashboard UI
-- `web/app.js` - Frontend logic
-- `web/styles.css` - Styling
-- `docs/WEB_DASHBOARD.md` - Setup guide
+### Files Created
+- `internal/dashboard/server.go` - HTTP server implementation
+- `internal/dashboard/templates/index.html` - Dashboard UI (embedded)
+- `internal/dashboard/server_test.go` - Comprehensive tests
+- `docs/DASHBOARD.md` - Complete documentation
+- `docs/DASHBOARD_API.md` - API specification
+
+### Related
+- Upstream Issue: https://github.com/dlorenc/multiclaude/issues/169
+- Documentation: [docs/DASHBOARD.md](DASHBOARD.md)
+- API Spec: [docs/DASHBOARD_API.md](DASHBOARD_API.md)
 
 ---
 
@@ -270,8 +241,9 @@ make check-all
 
 1. ✅ Merge pending PRs to fork
 2. ✅ Create fork maintenance strategy doc
-3. 📋 Implement event system in daemon
-4. 📋 Build Slack integration
-5. 📋 Build web dashboard
-6. 📋 Document fork features
+3. ✅ Implement event system in daemon (PR #51)
+4. ✅ Build web dashboard (PR TBD)
+5. 📋 Create PRs for both fork-only features
+6. 📋 Test both features in production
+7. 📋 Consider multi-machine monitoring (future)
 
