@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dlorenc/multiclaude/internal/events"
 	"github.com/dlorenc/multiclaude/internal/hooks"
 	"github.com/dlorenc/multiclaude/internal/logging"
 	"github.com/dlorenc/multiclaude/internal/messages"
@@ -33,6 +34,7 @@ type Daemon struct {
 	server       *socket.Server
 	pidFile      *PIDFile
 	claudeRunner *claude.Runner
+	eventBus     *events.Bus
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -61,6 +63,10 @@ func New(paths *config.Paths) (*Daemon, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	tmuxClient := tmux.NewClient()
+
+	// Initialize event bus with current hook configuration
+	eventBus := events.NewBus(st.GetHookConfig())
+
 	d := &Daemon{
 		paths:        paths,
 		state:        st,
@@ -68,6 +74,7 @@ func New(paths *config.Paths) (*Daemon, error) {
 		logger:       logger,
 		pidFile:      NewPIDFile(paths.DaemonPID),
 		claudeRunner: claude.NewRunner(claude.WithTerminal(tmuxClient)),
+		eventBus:     eventBus,
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -646,6 +653,12 @@ func (d *Daemon) handleRequest(req socket.Request) socket.Response {
 
 	case "update_repo_config":
 		return d.handleUpdateRepoConfig(req)
+
+	case "get_hook_config":
+		return d.handleGetHookConfig(req)
+
+	case "update_hook_config":
+		return d.handleUpdateHookConfig(req)
 
 	case "set_current_repo":
 		return d.handleSetCurrentRepo(req)
@@ -1333,6 +1346,13 @@ func (d *Daemon) cleanupDeadAgents(deadAgents map[string][]string) {
 			// Remove from state
 			if err := d.state.RemoveAgent(repoName, agentName); err != nil {
 				d.logger.Error("Failed to remove agent %s/%s from state: %v", repoName, agentName, err)
+			} else {
+				// Emit agent_stopped event
+				reason := "cleanup"
+				if agent.ReadyForCleanup {
+					reason = "completed"
+				}
+				d.eventBus.Emit(events.NewAgentStoppedEvent(repoName, agentName, reason))
 			}
 
 			// Clean up worktree if it exists (workers and review agents have worktrees)
@@ -1751,6 +1771,11 @@ func (d *Daemon) startAgent(repoName string, repo *state.Repository, agentName s
 	}
 
 	d.logger.Info("Started and registered agent %s/%s", repoName, agentName)
+
+	// Emit agent_started event
+	// Note: task description is not available in this function, would need to be passed as parameter
+	d.eventBus.Emit(events.NewAgentStartedEvent(repoName, agentName, string(agentType), ""))
+
 	return nil
 }
 
@@ -2182,4 +2207,61 @@ func (d *Daemon) repairCredentials() (int, error) {
 	}
 
 	return fixed, nil
+}
+
+// handleGetHookConfig returns the current hook configuration
+func (d *Daemon) handleGetHookConfig(req socket.Request) socket.Response {
+	config := d.state.GetHookConfig()
+	return socket.Response{
+		Success: true,
+		Data:    config,
+	}
+}
+
+// handleUpdateHookConfig updates the hook configuration
+func (d *Daemon) handleUpdateHookConfig(req socket.Request) socket.Response {
+	// Parse the hook config from args
+	var config events.HookConfig
+
+	if onEvent, ok := req.Args["on_event"].(string); ok {
+		config.OnEvent = onEvent
+	}
+	if onPRCreated, ok := req.Args["on_pr_created"].(string); ok {
+		config.OnPRCreated = onPRCreated
+	}
+	if onAgentIdle, ok := req.Args["on_agent_idle"].(string); ok {
+		config.OnAgentIdle = onAgentIdle
+	}
+	if onMergeComplete, ok := req.Args["on_merge_complete"].(string); ok {
+		config.OnMergeComplete = onMergeComplete
+	}
+	if onAgentStarted, ok := req.Args["on_agent_started"].(string); ok {
+		config.OnAgentStarted = onAgentStarted
+	}
+	if onAgentStopped, ok := req.Args["on_agent_stopped"].(string); ok {
+		config.OnAgentStopped = onAgentStopped
+	}
+	if onTaskAssigned, ok := req.Args["on_task_assigned"].(string); ok {
+		config.OnTaskAssigned = onTaskAssigned
+	}
+	if onCIFailed, ok := req.Args["on_ci_failed"].(string); ok {
+		config.OnCIFailed = onCIFailed
+	}
+	if onWorkerStuck, ok := req.Args["on_worker_stuck"].(string); ok {
+		config.OnWorkerStuck = onWorkerStuck
+	}
+	if onMessageSent, ok := req.Args["on_message_sent"].(string); ok {
+		config.OnMessageSent = onMessageSent
+	}
+
+	// Update state
+	if err := d.state.UpdateHookConfig(config); err != nil {
+		return socket.Response{Success: false, Error: err.Error()}
+	}
+
+	// Update event bus configuration
+	d.eventBus.UpdateConfig(config)
+
+	d.logger.Info("Updated hook configuration")
+	return socket.Response{Success: true}
 }
