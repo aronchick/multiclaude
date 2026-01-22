@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dlorenc/multiclaude/internal/agents"
+	"github.com/dlorenc/multiclaude/internal/events"
 	"github.com/dlorenc/multiclaude/internal/hooks"
 	"github.com/dlorenc/multiclaude/internal/logging"
 	"github.com/dlorenc/multiclaude/internal/messages"
@@ -35,6 +36,7 @@ type Daemon struct {
 	server       *socket.Server
 	pidFile      *PIDFile
 	claudeRunner *claude.Runner
+	eventBus     *events.Bus
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -63,6 +65,10 @@ func New(paths *config.Paths) (*Daemon, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	tmuxClient := tmux.NewClient()
+
+	// Initialize event bus with current hook configuration
+	eventBus := events.NewBus(st.GetHookConfig())
+
 	d := &Daemon{
 		paths:        paths,
 		state:        st,
@@ -70,6 +76,7 @@ func New(paths *config.Paths) (*Daemon, error) {
 		logger:       logger,
 		pidFile:      NewPIDFile(paths.DaemonPID),
 		claudeRunner: claude.NewRunner(claude.WithTerminal(tmuxClient)),
+		eventBus:     eventBus,
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -633,6 +640,12 @@ func (d *Daemon) handleRequest(req socket.Request) socket.Response {
 
 	case "update_repo_config":
 		return d.handleUpdateRepoConfig(req)
+
+	case "get_hook_config":
+		return d.handleGetHookConfig(req)
+
+	case "update_hook_config":
+		return d.handleUpdateHookConfig(req)
 
 	case "set_current_repo":
 		return d.handleSetCurrentRepo(req)
@@ -1355,6 +1368,13 @@ func (d *Daemon) cleanupDeadAgents(deadAgents map[string][]string) {
 			// Remove from state
 			if err := d.state.RemoveAgent(repoName, agentName); err != nil {
 				d.logger.Error("Failed to remove agent %s/%s from state: %v", repoName, agentName, err)
+			} else {
+				// Emit agent_stopped event
+				reason := "cleanup"
+				if agent.ReadyForCleanup {
+					reason = "completed"
+				}
+				d.eventBus.Emit(events.NewAgentStoppedEvent(repoName, agentName, reason))
 			}
 
 			// Clean up worktree if it exists (workers and review agents have worktrees)
