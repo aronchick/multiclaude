@@ -14,18 +14,19 @@ Upstream (`dlorenc/multiclaude`) explicitly rejects these in ROADMAP.md:
 
 ---
 
-## 1. Slack Integration
+## 1. Event Hooks System
 
-### Status: 📋 Planned
+### Status: ✅ Implemented (PR #51)
 
 ### Purpose
-Send real-time notifications about multiclaude activity to Slack channels.
+Hook-based notification system that enables integration with external systems like Slack, Discord, email, or custom monitoring tools.
 
 ### Use Cases
 - Alert when CI fails on a PR
 - Notify when workers get stuck
-- Report daily summary of agent activity
+- Report when agents start/stop
 - Escalate when merge queue enters emergency mode
+- Custom integrations via user-provided scripts
 
 ### Architecture
 
@@ -34,73 +35,44 @@ Send real-time notifications about multiclaude activity to Slack channels.
 │   Daemon    │
 │             │
 │  ┌───────┐  │     ┌──────────────┐
-│  │ Event │──┼────▶│ Slack Client │──▶ Slack API
-│  │ Bus   │  │     └──────────────┘
-│  └───────┘  │
+│  │ Event │──┼────▶│ User Hook    │──▶ Slack/Discord/Email
+│  │ Bus   │  │     │ Script       │
+│  └───────┘  │     └──────────────┘
 │             │
 └─────────────┘
 ```
 
-### Implementation Plan
+### Implementation Details
 
-**Phase 1: Event System** (P0)
-- Add event bus to daemon
-- Emit events for key actions:
-  - `worker.created`
-  - `worker.completed`
-  - `worker.failed`
-  - `pr.created`
-  - `pr.merged`
-  - `ci.failed`
-  - `merge_queue.emergency_mode`
+**Event Types** (9 total)
+- `agent_started` - When an agent starts
+- `agent_stopped` - When an agent stops
+- `agent_idle` - When an agent is idle
+- `pr_created` - When a PR is created
+- `pr_merged` - When a PR is merged
+- `task_assigned` - When a task is assigned
+- `ci_failed` - When CI fails
+- `worker_stuck` - When a worker is stuck
+- `message_sent` - When an inter-agent message is sent
 
-**Phase 2: Slack Client** (P0)
-- Package: `internal/integrations/slack/`
-- Configuration via `.multiclaude/fork-config.json`
-- Support webhook URLs and bot tokens
-- Message formatting with rich attachments
+**Hook Configuration**
+- Global hooks stored in `~/.multiclaude/state.json`
+- Per-event hooks: `on_event`, `on_pr_created`, `on_agent_idle`, etc.
+- Fire-and-forget execution with 30s timeout
+- Zero dependencies: hooks are user-provided scripts
 
-**Phase 3: Notification Rules** (P1)
-- Filter which events trigger notifications
-- Channel routing (different events → different channels)
-- Quiet hours configuration
-- Rate limiting to avoid spam
+**Example: Slack Integration**
+See `examples/hooks/slack-notify.sh` for complete implementation
 
-### Configuration Example
+### Files Created
+- `internal/events/events.go` - Event types and event bus
+- `internal/events/events_test.go` - Comprehensive tests
+- `examples/hooks/slack-notify.sh` - Slack integration example
+- `examples/hooks/README.md` - Hook documentation
 
-```json
-{
-  "integrations": {
-    "slack": {
-      "enabled": true,
-      "webhook_url": "https://hooks.slack.com/services/...",
-      "channels": {
-        "default": "#multiclaude",
-        "ci_failures": "#multiclaude-alerts",
-        "emergency": "#multiclaude-urgent"
-      },
-      "notify_on": [
-        "ci.failed",
-        "worker.stuck",
-        "merge_queue.emergency_mode"
-      ],
-      "quiet_hours": {
-        "enabled": true,
-        "start": "22:00",
-        "end": "08:00",
-        "timezone": "America/Los_Angeles"
-      }
-    }
-  }
-}
-```
-
-### Files to Create
-- `internal/integrations/slack/client.go` - Slack API client
-- `internal/integrations/slack/formatter.go` - Message formatting
-- `internal/integrations/slack/config.go` - Configuration
-- `internal/daemon/events.go` - Event bus
-- `docs/SLACK_INTEGRATION.md` - Setup guide
+### Related
+- PR: #51
+- Upstream Issue: https://github.com/dlorenc/multiclaude/issues/170
 
 ---
 
