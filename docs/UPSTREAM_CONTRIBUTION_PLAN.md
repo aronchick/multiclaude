@@ -175,7 +175,8 @@ This PR comes from the `aronchick/multiclaude` fork where it has been tested in 
 - [ ] Agent restart command (#27)
 
 ### Pending Upstream Review 🔄
-(None yet - create PRs above)
+- [ ] #218 - CI guard rails - https://github.com/dlorenc/multiclaude/pull/218
+- [ ] #219 - Fork-aware workflows - https://github.com/dlorenc/multiclaude/pull/219
 
 ### Rejected by Upstream ❌
 (None yet)
