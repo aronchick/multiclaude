@@ -142,6 +142,34 @@ git rebase origin/main
 - Never skip or weaken CI to make your PR pass
 - If tests are flaky, fix the flakiness (or report it)
 
+**Run CI checks locally before pushing:**
+
+```bash
+# Quick check (runs build, unit tests, verify docs)
+make pre-commit
+
+# Full CI validation (includes E2E tests and coverage)
+make check-all
+```
+
+**Install git pre-commit hook:**
+
+```bash
+make install-hooks
+```
+
+This installs a git hook that automatically runs `make pre-commit` before each commit, catching CI issues locally. To skip temporarily: `git commit --no-verify`
+
+**Individual CI checks:**
+
+```bash
+make build        # Build all packages
+make unit-tests   # Run unit tests
+make e2e-tests    # Run E2E tests (slower)
+make verify-docs  # Check generated docs are up to date
+make coverage     # Coverage report
+```
+
 ### Review
 
 - PRs from workers are monitored by the merge queue
