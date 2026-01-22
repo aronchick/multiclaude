@@ -531,6 +531,14 @@ func (c *CLI) registerCommands() {
 		Usage:       "multiclaude bug [--output <file>] [--verbose] [description]",
 		Run:         c.bugReport,
 	}
+
+	// CI status command
+	c.rootCmd.Subcommands["ci-status"] = &Command{
+		Name:        "ci-status",
+		Description: "Check CI health for fork and upstream",
+		Usage:       "multiclaude ci-status [--repo <repo>]",
+		Run:         c.ciStatus,
+	}
 }
 
 // Daemon command implementations
@@ -4815,6 +4823,168 @@ func (c *CLI) startClaudeInTmux(binaryPath, tmuxSession, tmuxWindow, workDir, se
 	}
 
 	return pid, nil
+}
+
+// ciStatus checks CI health for fork and upstream repositories
+func (c *CLI) ciStatus(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	// Determine repository
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
+	}
+
+	// Load state
+	st, err := state.Load(c.paths.StateFile)
+	if err != nil {
+		return err
+	}
+
+	repo, exists := st.GetRepo(repoName)
+	if !exists {
+		return fmt.Errorf("repository '%s' not found", repoName)
+	}
+
+	// Get repository path
+	repoPath := filepath.Join(c.paths.ReposDir, repoName)
+
+	fmt.Printf("Checking CI status for repository: %s\n\n", repoName)
+
+	// Check fork (current repo) CI status
+	fmt.Println("Fork CI Status:")
+	forkStatus, err := c.getCIStatus(repoPath, "")
+	if err != nil {
+		fmt.Printf("  Error: %v\n", err)
+	} else {
+		c.displayCIStatus(forkStatus, repo.GithubURL)
+	}
+
+	// Check if there's an upstream (parent) repository
+	upstreamURL, err := c.getUpstreamRepo(repoPath)
+	if err != nil {
+		fmt.Printf("\nUpstream CI Status:\n  Not a fork or couldn't determine upstream: %v\n", err)
+		return nil
+	}
+
+	if upstreamURL == "" {
+		fmt.Println("\nUpstream CI Status:\n  Not a fork")
+		return nil
+	}
+
+	// Check upstream CI status
+	fmt.Println("\nUpstream CI Status:")
+	upstreamStatus, err := c.getCIStatus(repoPath, upstreamURL)
+	if err != nil {
+		fmt.Printf("  Error: %v\n", err)
+	} else {
+		c.displayCIStatus(upstreamStatus, upstreamURL)
+	}
+
+	return nil
+}
+
+// getCIStatus retrieves CI status for a repository using gh CLI
+// If repoURL is empty, checks the current repository; otherwise checks the specified repository
+func (c *CLI) getCIStatus(repoPath string, repoURL string) (map[string]interface{}, error) {
+	var cmd *exec.Cmd
+	if repoURL == "" {
+		// Check current repository
+		cmd = exec.Command("gh", "run", "list", "--branch", "main", "--limit", "1", "--json", "conclusion,status,createdAt,headBranch,workflowName")
+	} else {
+		// Check specific repository
+		cmd = exec.Command("gh", "run", "list", "--repo", repoURL, "--branch", "main", "--limit", "1", "--json", "conclusion,status,createdAt,headBranch,workflowName")
+	}
+	cmd.Dir = repoPath
+
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("gh command failed: %s", string(exitErr.Stderr))
+		}
+		return nil, fmt.Errorf("failed to run gh command: %w", err)
+	}
+
+	// Parse JSON output
+	var runs []map[string]interface{}
+	if err := json.Unmarshal(output, &runs); err != nil {
+		return nil, fmt.Errorf("failed to parse gh output: %w", err)
+	}
+
+	if len(runs) == 0 {
+		return nil, fmt.Errorf("no CI runs found")
+	}
+
+	return runs[0], nil
+}
+
+// getUpstreamRepo retrieves the upstream (parent) repository URL if it exists
+func (c *CLI) getUpstreamRepo(repoPath string) (string, error) {
+	cmd := exec.Command("gh", "repo", "view", "--json", "parent")
+	cmd.Dir = repoPath
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	// Parse JSON output
+	var result struct {
+		Parent *struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		} `json:"parent"`
+	}
+
+	if err := json.Unmarshal(output, &result); err != nil {
+		return "", fmt.Errorf("failed to parse repo info: %w", err)
+	}
+
+	if result.Parent == nil {
+		return "", nil // Not a fork
+	}
+
+	return result.Parent.NameWithOwner, nil
+}
+
+// displayCIStatus displays CI status information in a user-friendly format
+func (c *CLI) displayCIStatus(status map[string]interface{}, repoURL string) {
+	conclusion, _ := status["conclusion"].(string)
+	workflowStatus, _ := status["status"].(string)
+	workflowName, _ := status["workflowName"].(string)
+	createdAt, _ := status["createdAt"].(string)
+
+	fmt.Printf("  Repository: %s\n", repoURL)
+	if workflowName != "" {
+		fmt.Printf("  Workflow: %s\n", workflowName)
+	}
+
+	// Determine overall status
+	var statusDisplay string
+	if workflowStatus == "completed" {
+		switch conclusion {
+		case "success":
+			statusDisplay = "✓ Success"
+		case "failure":
+			statusDisplay = "✗ Failed"
+		case "cancelled":
+			statusDisplay = "⊘ Cancelled"
+		case "skipped":
+			statusDisplay = "⊙ Skipped"
+		default:
+			statusDisplay = fmt.Sprintf("? %s", conclusion)
+		}
+	} else {
+		statusDisplay = fmt.Sprintf("⋯ %s", workflowStatus)
+	}
+
+	fmt.Printf("  Status: %s\n", statusDisplay)
+
+	if createdAt != "" {
+		// Parse and format the timestamp
+		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			fmt.Printf("  Last run: %s\n", t.Format("2006-01-02 15:04:05"))
+		}
+	}
 }
 
 
