@@ -200,13 +200,21 @@ See `AGENTS.md` for detailed agent documentation including:
 
 ## Upstream Workflow (For Forks)
 
-If this repository is a fork, see `docs/UPSTREAM_WORKFLOW.md` for:
-- Bidirectional sync with upstream (pulling and contributing)
-- PR scope enforcement (one task = one PR)
-- Agent responsibilities for upstream management
-- Contribution cadence and grouping strategies
+If this repository is a fork, see these documents for comprehensive guidance:
 
-**Key principle:** All PRs should be focused and upstream-ready by default, even if you don't immediately contribute them back.
+**Workflow & Process:**
+- `docs/UPSTREAM_WORKFLOW.md` - Bidirectional sync, PR scope enforcement, contribution cadence
+- `docs/UPSTREAM_CONTRIBUTION_PLAN.md` - Current status of upstream contributions
+
+**Maintenance & Strategy:**
+- `docs/FORK_MAINTENANCE_STRATEGY.md` - Branching conventions, label usage, merge strategy
+- `docs/FORK_FEATURES_ROADMAP.md` - Features that stay in fork (not upstream)
+
+**Key principles:**
+- **Upstream First**: Contribute everything possible to upstream
+- **Focused PRs**: One task = one PR (no exceptions)
+- **Proper Labeling**: Use `upstream-ready`, `fork-only`, `upstream-pending` labels
+- **Branch Naming**: `upstream/*` for upstream contributions, `fork/*` for fork-only features
 
 ## Contributing Checklist
 
