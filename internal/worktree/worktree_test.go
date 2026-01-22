@@ -2554,6 +2554,29 @@ func TestCheckUpstreamDivergence(t *testing.T) {
 		upstreamRepo, cleanupUpstream := createTestRepo(t)
 		defer cleanupUpstream()
 
+		// Create local repo
+		localRepo, cleanupLocal := createTestRepo(t)
+		defer cleanupLocal()
+
+		manager := NewManager(localRepo)
+
+		// Add upstream remote and sync to establish common history
+		cmd := exec.Command("git", "remote", "add", "upstream", upstreamRepo)
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add upstream remote: %v", err)
+		}
+		cmd = exec.Command("git", "fetch", "upstream")
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to fetch upstream: %v", err)
+		}
+		cmd = exec.Command("git", "reset", "--hard", "upstream/main")
+		cmd.Dir = localRepo
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to reset to upstream/main: %v", err)
+		}
+
 		// Create 3 commits on upstream
 		for i := 0; i < 3; i++ {
 			testFile := filepath.Join(upstreamRepo, fmt.Sprintf("upstream%d.txt", i))
@@ -2574,20 +2597,7 @@ func TestCheckUpstreamDivergence(t *testing.T) {
 			}
 		}
 
-		// Create local repo
-		localRepo, cleanupLocal := createTestRepo(t)
-		defer cleanupLocal()
-
-		manager := NewManager(localRepo)
-
-		// Add upstream remote
-		cmd := exec.Command("git", "remote", "add", "upstream", upstreamRepo)
-		cmd.Dir = localRepo
-		if err := cmd.Run(); err != nil {
-			t.Fatalf("Failed to add upstream remote: %v", err)
-		}
-
-		// Fetch from upstream
+		// Fetch from upstream again
 		cmd = exec.Command("git", "fetch", "upstream")
 		cmd.Dir = localRepo
 		if err := cmd.Run(); err != nil {
