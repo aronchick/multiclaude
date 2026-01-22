@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MultiClaude Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+            background-color: #0d1117;
+            color: #c9d1d9;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: #58a6ff;
+            margin-bottom: 20px;
+            font-size: 32px;
+        }
+
+        h2 {
+            color: #8b949e;
+            margin: 20px 0 10px 0;
+            font-size: 20px;
+            border-bottom: 1px solid #21262d;
+            padding-bottom: 8px;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 20px;
+        }
+
+        .stat-label {
+            color: #8b949e;
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            color: #58a6ff;
+            font-size: 32px;
+            font-weight: bold;
+        }
+
+        .repos-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .repo-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 15px;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+
+        .repo-card:hover {
+            border-color: #58a6ff;
+        }
+
+        .repo-name {
+            color: #58a6ff;
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        .repo-url {
+            color: #8b949e;
+            font-size: 12px;
+            margin-bottom: 8px;
+            word-break: break-all;
+        }
+
+        .repo-agents {
+            color: #c9d1d9;
+            font-size: 14px;
+        }
+
+        .agents-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .agent-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 15px;
+        }
+
+        .agent-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .agent-name {
+            color: #c9d1d9;
+            font-weight: bold;
+        }
+
+        .agent-status {
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+
+        .status-active {
+            background: #238636;
+            color: #fff;
+        }
+
+        .status-idle {
+            background: #6e7681;
+            color: #fff;
+        }
+
+        .status-stuck {
+            background: #da3633;
+            color: #fff;
+        }
+
+        .agent-type {
+            color: #8b949e;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+
+        .agent-task {
+            color: #c9d1d9;
+            font-size: 13px;
+            margin-top: 8px;
+            padding: 8px;
+            background: #0d1117;
+            border-radius: 4px;
+        }
+
+        .activity-feed {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 15px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .activity-item {
+            padding: 10px;
+            border-bottom: 1px solid #21262d;
+        }
+
+        .activity-item:last-child {
+            border-bottom: none;
+        }
+
+        .activity-time {
+            color: #8b949e;
+            font-size: 12px;
+        }
+
+        .activity-message {
+            color: #c9d1d9;
+            margin-top: 5px;
+        }
+
+        .error {
+            color: #f85149;
+            padding: 15px;
+            background: #161b22;
+            border: 1px solid #f85149;
+            border-radius: 6px;
+            margin: 20px 0;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #8b949e;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>MultiClaude Dashboard</h1>
+
+        <div class="stats" id="stats">
+            <div class="stat-card">
+                <div class="stat-label">Total Agents</div>
+                <div class="stat-value" id="total-agents">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Active Agents</div>
+                <div class="stat-value" id="active-agents">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Idle Agents</div>
+                <div class="stat-value" id="idle-agents">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Repositories</div>
+                <div class="stat-value" id="repos-count">-</div>
+            </div>
+        </div>
+
+        <h2>Repositories</h2>
+        <div class="repos-grid" id="repos"></div>
+
+        <h2>Agents</h2>
+        <div class="agents-grid" id="agents"></div>
+
+        <h2>Activity Feed</h2>
+        <div class="activity-feed" id="activity"></div>
+    </div>
+
+    <script>
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function fetchData(url) {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return await response.json();
+        }
+
+        async function updateStats() {
+            try {
+                const data = await fetchData('/api/status');
+                document.getElementById('total-agents').textContent = data.total_agents || 0;
+                document.getElementById('active-agents').textContent = data.active_agents || 0;
+                document.getElementById('idle-agents').textContent = data.idle_agents || 0;
+                document.getElementById('repos-count').textContent = data.repos || 0;
+            } catch (error) {
+                console.error('Error fetching stats:', error);
+            }
+        }
+
+        async function updateRepos() {
+            try {
+                const repos = await fetchData('/api/repos');
+                const container = document.getElementById('repos');
+
+                if (repos.length === 0) {
+                    container.innerHTML = '<div class="loading">No repositories</div>';
+                    return;
+                }
+
+                container.innerHTML = repos.map(repo => `
+                    <div class="repo-card">
+                        <div class="repo-name">${escapeHtml(repo.name)}</div>
+                        <div class="repo-url">${escapeHtml(repo.github_url)}</div>
+                        <div class="repo-agents">${repo.agent_count} agent(s)</div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Error fetching repos:', error);
+                document.getElementById('repos').innerHTML = '<div class="error">Error loading repositories</div>';
+            }
+        }
+
+        async function updateAgents() {
+            try {
+                const repos = await fetchData('/api/repos');
+                const container = document.getElementById('agents');
+
+                let allAgents = [];
+                for (const repo of repos) {
+                    const agents = await fetchData(`/api/repos/${repo.name}/agents`);
+                    allAgents = allAgents.concat(agents.map(a => ({...a, repo: repo.name})));
+                }
+
+                if (allAgents.length === 0) {
+                    container.innerHTML = '<div class="loading">No agents</div>';
+                    return;
+                }
+
+                container.innerHTML = allAgents.map(agent => {
+                    const statusClass = `status-${agent.status}`;
+                    const taskHtml = agent.task ?
+                        `<div class="agent-task">${escapeHtml(agent.task)}</div>` : '';
+
+                    return `
+                        <div class="agent-card">
+                            <div class="agent-header">
+                                <div class="agent-name">${escapeHtml(agent.name)}</div>
+                                <div class="agent-status ${statusClass}">${escapeHtml(agent.status)}</div>
+                            </div>
+                            <div class="agent-type">${escapeHtml(agent.type)} • ${escapeHtml(agent.repo)}</div>
+                            ${taskHtml}
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('Error fetching agents:', error);
+                document.getElementById('agents').innerHTML = '<div class="error">Error loading agents</div>';
+            }
+        }
+
+        async function updateActivity() {
+            try {
+                const repos = await fetchData('/api/repos');
+                const container = document.getElementById('activity');
+
+                let allActivity = [];
+                for (const repo of repos) {
+                    const activity = await fetchData(`/api/repos/${repo.name}/activity`);
+                    allActivity = allActivity.concat(activity.map(a => ({...a, repo: repo.name})));
+                }
+
+                // Sort by timestamp descending
+                allActivity.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+                if (allActivity.length === 0) {
+                    container.innerHTML = '<div class="loading">No recent activity</div>';
+                    return;
+                }
+
+                container.innerHTML = allActivity.slice(0, 20).map(item => {
+                    const time = new Date(item.timestamp).toLocaleString();
+                    return `
+                        <div class="activity-item">
+                            <div class="activity-time">${escapeHtml(time)} • ${escapeHtml(item.repo)}</div>
+                            <div class="activity-message">${escapeHtml(item.message)}</div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('Error fetching activity:', error);
+                document.getElementById('activity').innerHTML = '<div class="error">Error loading activity</div>';
+            }
+        }
+
+        async function refresh() {
+            await Promise.all([
+                updateStats(),
+                updateRepos(),
+                updateAgents(),
+                updateActivity()
+            ]);
+        }
+
+        // Initial load
+        refresh();
+
+        // Auto-refresh every 5 seconds
+        setInterval(refresh, 5000);
+    </script>
+</body>
+</html>
+
+
+
