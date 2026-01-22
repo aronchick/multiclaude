@@ -6,6 +6,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/dlorenc/multiclaude/internal/events"
 )
 
 // AgentType represents the type of agent
@@ -107,6 +109,7 @@ type Repository struct {
 type State struct {
 	Repos       map[string]*Repository `json:"repos"`
 	CurrentRepo string                 `json:"current_repo,omitempty"`
+	Hooks       events.HookConfig      `json:"hooks,omitempty"` // Global hook configuration
 	mu          sync.RWMutex
 	path        string
 }
@@ -533,4 +536,19 @@ func (s *State) saveUnlocked() error {
 	}
 
 	return nil
+}
+
+// GetHookConfig returns the current hook configuration
+func (s *State) GetHookConfig() events.HookConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Hooks
+}
+
+// UpdateHookConfig updates the hook configuration
+func (s *State) UpdateHookConfig(config events.HookConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Hooks = config
+	return s.saveUnlocked()
 }
