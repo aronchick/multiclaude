@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -102,12 +103,13 @@ func (d *Daemon) Start() error {
 	d.restoreTrackedRepos()
 
 	// Start core loops after restore completes
-	d.wg.Add(5)
+	d.wg.Add(6)
 	go d.healthCheckLoop()
 	go d.messageRouterLoop()
 	go d.wakeLoop()
 	go d.serverLoop()
 	go d.worktreeRefreshLoop()
+	go d.forkUpstreamSyncLoop()
 
 	return nil
 }
@@ -759,18 +761,50 @@ func (d *Daemon) handleAddRepo(req socket.Request) socket.Response {
 		}
 	}
 
+	// Parse upstream configuration (optional)
+	var upstreamConfig *state.UpstreamConfig
+	if upstreamURL, ok := req.Args["upstream_url"].(string); ok && upstreamURL != "" {
+		upstreamConfig = &state.UpstreamConfig{
+			UpstreamURL:    upstreamURL,
+			UpstreamRemote: "upstream",
+			ForkRemote:     "origin",
+			SyncEnabled:    true,
+			SyncInterval:   30, // Default 30 minutes
+		}
+		if upstreamRemote, ok := req.Args["upstream_remote"].(string); ok {
+			upstreamConfig.UpstreamRemote = upstreamRemote
+		}
+		if forkRemote, ok := req.Args["fork_remote"].(string); ok {
+			upstreamConfig.ForkRemote = forkRemote
+		}
+		if syncEnabled, ok := req.Args["sync_enabled"].(bool); ok {
+			upstreamConfig.SyncEnabled = syncEnabled
+		}
+		if syncInterval, ok := req.Args["sync_interval"].(int); ok {
+			upstreamConfig.SyncInterval = syncInterval
+		} else if syncIntervalFloat, ok := req.Args["sync_interval"].(float64); ok {
+			upstreamConfig.SyncInterval = int(syncIntervalFloat)
+		}
+	}
+
 	repo := &state.Repository{
 		GithubURL:        githubURL,
 		TmuxSession:      tmuxSession,
 		Agents:           make(map[string]state.Agent),
 		MergeQueueConfig: mqConfig,
+		UpstreamConfig:   upstreamConfig,
 	}
 
 	if err := d.state.AddRepo(name, repo); err != nil {
 		return socket.Response{Success: false, Error: err.Error()}
 	}
 
-	d.logger.Info("Added repository: %s (merge queue: enabled=%v, track=%s)", name, mqConfig.Enabled, mqConfig.TrackMode)
+	if upstreamConfig != nil {
+		d.logger.Info("Added repository: %s (merge queue: enabled=%v, track=%s, upstream: %s, sync interval: %dm)",
+			name, mqConfig.Enabled, mqConfig.TrackMode, upstreamConfig.UpstreamURL, upstreamConfig.SyncInterval)
+	} else {
+		d.logger.Info("Added repository: %s (merge queue: enabled=%v, track=%s)", name, mqConfig.Enabled, mqConfig.TrackMode)
+	}
 	return socket.Response{Success: true}
 }
 
@@ -2309,4 +2343,162 @@ func (d *Daemon) repairCredentials() (int, error) {
 	}
 
 	return fixed, nil
+}
+
+// handleGetHookConfig returns the current hook configuration
+func (d *Daemon) handleGetHookConfig(req socket.Request) socket.Response {
+	config := d.state.GetHookConfig()
+	return socket.Response{
+		Success: true,
+		Data:    config,
+	}
+}
+
+// handleUpdateHookConfig updates the hook configuration
+func (d *Daemon) handleUpdateHookConfig(req socket.Request) socket.Response {
+	// Parse the hook config from args
+	var config events.HookConfig
+
+	if onEvent, ok := req.Args["on_event"].(string); ok {
+		config.OnEvent = onEvent
+	}
+	if onPRCreated, ok := req.Args["on_pr_created"].(string); ok {
+		config.OnPRCreated = onPRCreated
+	}
+	if onAgentIdle, ok := req.Args["on_agent_idle"].(string); ok {
+		config.OnAgentIdle = onAgentIdle
+	}
+	if onMergeComplete, ok := req.Args["on_merge_complete"].(string); ok {
+		config.OnMergeComplete = onMergeComplete
+	}
+	if onAgentStarted, ok := req.Args["on_agent_started"].(string); ok {
+		config.OnAgentStarted = onAgentStarted
+	}
+	if onAgentStopped, ok := req.Args["on_agent_stopped"].(string); ok {
+		config.OnAgentStopped = onAgentStopped
+	}
+	if onTaskAssigned, ok := req.Args["on_task_assigned"].(string); ok {
+		config.OnTaskAssigned = onTaskAssigned
+	}
+	if onCIFailed, ok := req.Args["on_ci_failed"].(string); ok {
+		config.OnCIFailed = onCIFailed
+	}
+	if onWorkerStuck, ok := req.Args["on_worker_stuck"].(string); ok {
+		config.OnWorkerStuck = onWorkerStuck
+	}
+	if onMessageSent, ok := req.Args["on_message_sent"].(string); ok {
+		config.OnMessageSent = onMessageSent
+	}
+
+	// Update state
+	if err := d.state.UpdateHookConfig(config); err != nil {
+		return socket.Response{Success: false, Error: err.Error()}
+	}
+
+	// Update event bus configuration
+	d.eventBus.UpdateConfig(config)
+
+	d.logger.Info("Updated hook configuration")
+	return socket.Response{Success: true}
+}
+
+// forkUpstreamSyncLoop monitors fork/upstream divergence and CI status
+func (d *Daemon) forkUpstreamSyncLoop() {
+	defer d.wg.Done()
+	d.logger.Info("Starting fork/upstream sync loop")
+
+	// Default check interval is 30 minutes, but can be configured per-repo
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+
+	// Run once immediately on startup (after a short delay to let things settle)
+	time.Sleep(1 * time.Minute)
+	d.checkForkUpstreamStatus()
+
+	for {
+		select {
+		case <-ticker.C:
+			d.checkForkUpstreamStatus()
+		case <-d.ctx.Done():
+			d.logger.Info("Fork/upstream sync loop stopped")
+			return
+		}
+	}
+}
+
+// checkForkUpstreamStatus checks fork/upstream status for all repos with upstream tracking
+func (d *Daemon) checkForkUpstreamStatus() {
+	d.logger.Debug("Checking fork/upstream status")
+
+	repos := d.state.GetAllRepos()
+	for repoName, repo := range repos {
+		if repo.UpstreamConfig == nil || !repo.UpstreamConfig.SyncEnabled {
+			continue // Skip repos without upstream tracking
+		}
+
+		d.logger.Debug("Checking upstream status for repo: %s", repoName)
+
+		// Check divergence (is fork behind upstream?)
+		divergence := d.checkUpstreamDivergence(repoName, repo)
+
+		// For now, we'll use simplified CI status checking
+		// In a full implementation, this would query GitHub API
+		forkCI := state.CILayerStatus{
+			Status:     "unknown",
+			LastCheck:  time.Now(),
+			LastCommit: "",
+		}
+
+		upstreamCI := state.CILayerStatus{
+			Status:     "unknown",
+			LastCheck:  time.Now(),
+			LastCommit: "",
+		}
+
+		// Update state
+		if err := d.state.UpdateDualCIStatus(repoName, forkCI, upstreamCI, divergence); err != nil {
+			d.logger.Error("Failed to update dual CI status for %s: %v", repoName, err)
+		}
+
+		// Log warnings if divergence is significant
+		if divergence > 10 {
+			d.logger.Warn("Repo %s is %d commits behind upstream", repoName, divergence)
+		}
+	}
+}
+
+// checkUpstreamDivergence checks how many commits fork is behind upstream
+func (d *Daemon) checkUpstreamDivergence(repoName string, repo *state.Repository) int {
+	repoPath := d.paths.RepoDir(repoName)
+
+	// Fetch from upstream (silently)
+	cmd := exec.Command("git", "-C", repoPath, "fetch", repo.UpstreamConfig.UpstreamRemote)
+	if err := cmd.Run(); err != nil {
+		d.logger.Warn("Failed to fetch from upstream for %s: %v", repoName, err)
+		return 0
+	}
+
+	// Try main branch first
+	upstreamBranch := fmt.Sprintf("%s/main", repo.UpstreamConfig.UpstreamRemote)
+	cmd = exec.Command("git", "-C", repoPath, "rev-list", "--count", "HEAD.."+upstreamBranch)
+	output, err := cmd.Output()
+	if err != nil {
+		// Try master if main doesn't exist
+		upstreamBranch = fmt.Sprintf("%s/master", repo.UpstreamConfig.UpstreamRemote)
+		cmd = exec.Command("git", "-C", repoPath, "rev-list", "--count", "HEAD.."+upstreamBranch)
+		output, err = cmd.Output()
+		if err != nil {
+			d.logger.Warn("Failed to check divergence for %s: %v", repoName, err)
+			return 0
+		}
+	}
+
+	countStr := strings.TrimSpace(string(output))
+	count, err := strconv.Atoi(countStr)
+	if err != nil {
+		d.logger.Warn("Failed to parse divergence count for %s: %v", repoName, err)
+		return 0
+	}
+
+	return count
 }

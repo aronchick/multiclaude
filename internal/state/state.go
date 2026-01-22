@@ -109,6 +109,33 @@ type Agent struct {
 	ReadyForCleanup bool      `json:"ready_for_cleanup,omitempty"` // Only for workers
 }
 
+// UpstreamConfig holds configuration for fork/upstream tracking
+type UpstreamConfig struct {
+	UpstreamURL    string `json:"upstream_url"`     // e.g., "https://github.com/dlorenc/multiclaude"
+	UpstreamRemote string `json:"upstream_remote"`  // Usually "upstream"
+	ForkRemote     string `json:"fork_remote"`      // Usually "origin"
+	SyncEnabled    bool   `json:"sync_enabled"`     // Enable fork/upstream sync
+	SyncInterval   int    `json:"sync_interval"`    // Minutes between sync checks (default: 30)
+}
+
+// CILayerStatus represents CI status for one layer (fork or upstream)
+type CILayerStatus struct {
+	Status       string     `json:"status"`                   // "passing", "failing", "pending", "unknown"
+	LastCheck    time.Time  `json:"last_check"`               // When we last checked
+	LastCommit   string     `json:"last_commit"`              // SHA of last checked commit
+	FailingSince *time.Time `json:"failing_since,omitempty"`  // When did it start failing
+	CheckURL     string     `json:"check_url,omitempty"`      // GH Actions URL
+}
+
+// DualCIStatus tracks CI status at both fork and upstream layers
+type DualCIStatus struct {
+	ForkCI          CILayerStatus `json:"fork_ci"`
+	UpstreamCI      CILayerStatus `json:"upstream_ci"`
+	LastSyncTime    time.Time     `json:"last_sync_time"`    // Last time we synced with upstream
+	LastSyncSHA     string        `json:"last_sync_sha"`     // Last upstream commit synced
+	DivergenceCount int           `json:"divergence_count"`  // Commits fork is behind upstream
+}
+
 // Repository represents a tracked repository's state
 type Repository struct {
 	GithubURL        string             `json:"github_url"`
@@ -116,6 +143,9 @@ type Repository struct {
 	Agents           map[string]Agent   `json:"agents"`
 	TaskHistory      []TaskHistoryEntry `json:"task_history,omitempty"`
 	MergeQueueConfig MergeQueueConfig   `json:"merge_queue_config,omitempty"`
+	// Dual-layer CI tracking for fork/upstream workflows
+	UpstreamConfig   *UpstreamConfig    `json:"upstream_config,omitempty"`
+	DualCIStatus     *DualCIStatus      `json:"dual_ci_status,omitempty"`
 }
 
 // State represents the entire daemon state
@@ -569,4 +599,83 @@ func (s *State) saveUnlocked() error {
 	}
 
 	return atomicWrite(s.path, data)
+}
+
+// SetUpstreamConfig sets the upstream configuration for a repository
+func (s *State) SetUpstreamConfig(repoName string, config *UpstreamConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	repo.UpstreamConfig = config
+	return s.saveUnlocked()
+}
+
+// GetUpstreamConfig returns the upstream configuration for a repository
+func (s *State) GetUpstreamConfig(repoName string) (*UpstreamConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return nil, fmt.Errorf("repository %q not found", repoName)
+	}
+
+	return repo.UpstreamConfig, nil
+}
+
+// UpdateDualCIStatus updates the dual CI status for a repository
+func (s *State) UpdateDualCIStatus(repoName string, forkCI, upstreamCI CILayerStatus, divergence int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	if repo.DualCIStatus == nil {
+		repo.DualCIStatus = &DualCIStatus{}
+	}
+
+	repo.DualCIStatus.ForkCI = forkCI
+	repo.DualCIStatus.UpstreamCI = upstreamCI
+	repo.DualCIStatus.DivergenceCount = divergence
+	return s.saveUnlocked()
+}
+
+// UpdateSyncTime updates the last sync time and SHA for a repository
+func (s *State) UpdateSyncTime(repoName string, syncTime time.Time, syncSHA string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	if repo.DualCIStatus == nil {
+		repo.DualCIStatus = &DualCIStatus{}
+	}
+
+	repo.DualCIStatus.LastSyncTime = syncTime
+	repo.DualCIStatus.LastSyncSHA = syncSHA
+	return s.saveUnlocked()
+}
+
+// GetDualCIStatus returns the dual CI status for a repository
+func (s *State) GetDualCIStatus(repoName string) (*DualCIStatus, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return nil, fmt.Errorf("repository %q not found", repoName)
+	}
+
+	return repo.DualCIStatus, nil
 }
