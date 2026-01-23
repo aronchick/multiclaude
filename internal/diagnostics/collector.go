@@ -15,12 +15,12 @@ import (
 // Report contains all diagnostic information in machine-readable format
 type Report struct {
 	// Version information
-	Version     VersionInfo     `json:"version"`
-	Environment EnvironmentInfo `json:"environment"`
+	Version      VersionInfo      `json:"version"`
+	Environment  EnvironmentInfo  `json:"environment"`
 	Capabilities CapabilitiesInfo `json:"capabilities"`
-	Tools       ToolsInfo       `json:"tools"`
-	Daemon      DaemonInfo      `json:"daemon"`
-	Statistics  StatisticsInfo  `json:"statistics"`
+	Tools        ToolsInfo        `json:"tools"`
+	Daemon       DaemonInfo       `json:"daemon"`
+	Statistics   StatisticsInfo   `json:"statistics"`
 }
 
 // VersionInfo contains version details for multiclaude and dependencies
@@ -32,11 +32,11 @@ type VersionInfo struct {
 
 // EnvironmentInfo contains environment variables and system information
 type EnvironmentInfo struct {
-	OS           string            `json:"os"`
-	Arch         string            `json:"arch"`
-	HomeDir      string            `json:"home_dir"`
-	Paths        PathsInfo         `json:"paths"`
-	Variables    map[string]string `json:"variables"`
+	OS        string            `json:"os"`
+	Arch      string            `json:"arch"`
+	HomeDir   string            `json:"home_dir"`
+	Paths     PathsInfo         `json:"paths"`
+	Variables map[string]string `json:"variables"`
 }
 
 // PathsInfo contains multiclaude directory paths
@@ -54,7 +54,7 @@ type PathsInfo struct {
 
 // CapabilitiesInfo describes what features are available
 type CapabilitiesInfo struct {
-	TaskManagement bool `json:"task_management"`
+	TaskManagement  bool `json:"task_management"`
 	ClaudeInstalled bool `json:"claude_installed"`
 	TmuxInstalled   bool `json:"tmux_installed"`
 	GitInstalled    bool `json:"git_installed"`
@@ -145,7 +145,7 @@ func (c *Collector) collectEnvironment() EnvironmentInfo {
 		if value := os.Getenv(varName); value != "" {
 			// Redact sensitive values
 			if strings.Contains(strings.ToLower(varName), "token") ||
-			   strings.Contains(strings.ToLower(varName), "key") {
+				strings.Contains(strings.ToLower(varName), "key") {
 				envVars[varName] = "[REDACTED]"
 			} else {
 				envVars[varName] = value
