@@ -370,26 +370,25 @@ func (c *CLI) registerCommands() {
 		Run:         c.stopAll,
 	}
 
-	// Repository commands
-	c.rootCmd.Subcommands["init"] = &Command{
-		Name:        "init",
-		Description: "Initialize a repository",
-		Usage:       "multiclaude init <github-url> [name] [--no-merge-queue] [--mq-track=all|author|assigned]",
-		Run:         c.initRepo,
-	}
-
-	c.rootCmd.Subcommands["list"] = &Command{
-		Name:        "list",
-		Description: "List tracked repositories",
-		Usage:       "multiclaude list",
-		Run:         c.listRepos,
-	}
-
 	// Repository commands (repo subcommand)
 	repoCmd := &Command{
 		Name:        "repo",
 		Description: "Manage repositories",
 		Subcommands: make(map[string]*Command),
+	}
+
+	repoCmd.Subcommands["init"] = &Command{
+		Name:        "init",
+		Description: "Initialize a repository",
+		Usage:       "multiclaude repo init <github-url> [name] [--no-merge-queue] [--mq-track=all|author|assigned]",
+		Run:         c.initRepo,
+	}
+
+	repoCmd.Subcommands["list"] = &Command{
+		Name:        "list",
+		Description: "List tracked repositories",
+		Usage:       "multiclaude repo list",
+		Run:         c.listRepos,
 	}
 
 	repoCmd.Subcommands["rm"] = &Command{
@@ -420,7 +419,19 @@ func (c *CLI) registerCommands() {
 		Run:         c.clearCurrentRepo,
 	}
 
+	repoCmd.Subcommands["history"] = &Command{
+		Name:        "history",
+		Description: "Show task history for a repository",
+		Usage:       "multiclaude repo history [--repo <repo>] [-n <count>] [--status <status>] [--search <query>] [--full]",
+		Run:         c.showHistory,
+	}
+
 	c.rootCmd.Subcommands["repo"] = repoCmd
+
+	// Backward compatibility aliases for root-level repo commands
+	c.rootCmd.Subcommands["init"] = repoCmd.Subcommands["init"]
+	c.rootCmd.Subcommands["list"] = repoCmd.Subcommands["list"]
+	c.rootCmd.Subcommands["history"] = repoCmd.Subcommands["history"]
 
 	// Worker commands
 	workerCmd := &Command{
@@ -497,14 +508,6 @@ func (c *CLI) registerCommands() {
 	}
 
 	c.rootCmd.Subcommands["workspace"] = workspaceCmd
-
-	// History command
-	c.rootCmd.Subcommands["history"] = &Command{
-		Name:        "history",
-		Description: "Show task history for a repository",
-		Usage:       "multiclaude history [--repo <repo>] [-n <count>] [--status <status>] [--search <query>] [--full]",
-		Run:         c.showHistory,
-	}
 
 	// Agent commands (run from within Claude)
 	agentCmd := &Command{

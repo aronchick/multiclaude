@@ -215,7 +215,7 @@ CLI communicates with daemon via Unix socket at `~/.multiclaude/daemon.sock`.
 
 ### Repository Initialization
 
-`multiclaude init <github-url>`
+`multiclaude repo init <github-url>`
 
 1. Clone repo to `~/.multiclaude/repos/<name>`
 2. Create tmux session `mc-<name>`

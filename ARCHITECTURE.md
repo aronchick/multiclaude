@@ -309,7 +309,7 @@ multiclaude
 ### Repository Initialization
 
 ```
-User: multiclaude init https://github.com/org/repo
+User: multiclaude repo init https://github.com/org/repo
 
 CLI                          Daemon                       System
  │                              │                            │

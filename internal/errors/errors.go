@@ -150,7 +150,7 @@ func NotInRepo() *CLIError {
 	return &CLIError{
 		Category:   CategoryConfig,
 		Message:    "not in a tracked repository",
-		Suggestion: "multiclaude init <github-url> to track a repository, or use --repo flag",
+		Suggestion: "multiclaude repo init <github-url> to track a repository, or use --repo flag",
 	}
 }
 
@@ -343,7 +343,7 @@ func NoRepositoriesFound() *CLIError {
 	return &CLIError{
 		Category:   CategoryNotFound,
 		Message:    "no repositories found",
-		Suggestion: "multiclaude init <github-url>",
+		Suggestion: "multiclaude repo init <github-url>",
 	}
 }
 

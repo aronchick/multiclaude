@@ -8,7 +8,7 @@ Run the following commands and summarize the results:
 
 1. List tracked repos and agents:
    ```bash
-   multiclaude list
+   multiclaude repo list
    ```
 
 2. Check daemon status:

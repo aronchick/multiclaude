@@ -97,7 +97,7 @@ go install github.com/dlorenc/multiclaude/cmd/multiclaude@latest
 multiclaude start
 
 # Initialize a repository
-multiclaude init https://github.com/your/repo
+multiclaude repo init https://github.com/your/repo
 
 # Create a worker to do a task
 multiclaude worker create "Add unit tests for the auth module"
@@ -147,10 +147,10 @@ multiclaude stop-all --clean   # Stop and remove all state files
 ### Repositories
 
 ```bash
-multiclaude init <github-url>              # Initialize repository tracking
-multiclaude init <github-url> [path] [name] # With custom local path or name
-multiclaude list                           # List tracked repositories
-multiclaude repo rm <name>                 # Remove a tracked repository
+multiclaude repo init <github-url>              # Initialize repository tracking
+multiclaude repo init <github-url> [path] [name] # With custom local path or name
+multiclaude repo list                           # List tracked repositories
+multiclaude repo rm <name>                      # Remove a tracked repository
 ```
 
 ### Workspaces
@@ -170,7 +170,7 @@ multiclaude workspace <name>               # Connect to workspace (shorthand)
 **Notes:**
 - Workspaces use the branch naming convention `workspace/<name>`
 - Workspace names follow git branch naming rules (no spaces, special characters, etc.)
-- A "default" workspace is created automatically when you run `multiclaude init`
+- A "default" workspace is created automatically when you run `multiclaude repo init`
 - Use `multiclaude attach <workspace-name>` as an alternative to `workspace connect`
 
 ### Workers

@@ -141,8 +141,8 @@ func TestNotInRepo(t *testing.T) {
 	if !strings.Contains(formatted, "not in a tracked repository") {
 		t.Errorf("expected message, got: %s", formatted)
 	}
-	if !strings.Contains(formatted, "multiclaude init") {
-		t.Errorf("expected init suggestion, got: %s", formatted)
+	if !strings.Contains(formatted, "multiclaude repo init") {
+		t.Errorf("expected repo init suggestion, got: %s", formatted)
 	}
 }
 
@@ -485,8 +485,8 @@ func TestNoRepositoriesFound(t *testing.T) {
 	if !strings.Contains(formatted, "no repositories found") {
 		t.Errorf("expected 'no repositories found' in message, got: %s", formatted)
 	}
-	if !strings.Contains(formatted, "multiclaude init") {
-		t.Errorf("expected init suggestion, got: %s", formatted)
+	if !strings.Contains(formatted, "multiclaude repo init") {
+		t.Errorf("expected repo init suggestion, got: %s", formatted)
 	}
 }
 

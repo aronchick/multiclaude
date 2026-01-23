@@ -213,7 +213,7 @@ multiclaude repair
 # Or reinitialize if needed
 multiclaude stop-all
 multiclaude start
-multiclaude init <github-url>  # Will fail if repo exists
+multiclaude repo init <github-url>  # Will fail if repo exists
 ```
 
 **Impact:**
@@ -275,7 +275,7 @@ multiclaude start
 multiclaude repair
 
 # Check what remains
-multiclaude list
+multiclaude repo list
 multiclaude worker list
 ```
 
