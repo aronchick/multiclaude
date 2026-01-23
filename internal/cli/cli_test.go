@@ -875,7 +875,7 @@ func TestCLISocketCommunication(t *testing.T) {
 func TestCLIWorkCreateWithRealTmux(t *testing.T) {
 	tmuxClient := tmux.NewClient()
 	if !tmuxClient.IsTmuxAvailable() {
-		t.Skip("tmux not available, skipping test")
+		t.Fatal("tmux is required for this test but not available")
 	}
 
 	cli, d, cleanup := setupTestEnvironment(t)
@@ -1821,7 +1821,7 @@ func TestCLIRemoveWorkerNonexistent(t *testing.T) {
 func TestCLIRemoveWorkerWithRealTmux(t *testing.T) {
 	tmuxClient := tmux.NewClient()
 	if !tmuxClient.IsTmuxAvailable() {
-		t.Skip("tmux not available, skipping test")
+		t.Fatal("tmux is required for this test but not available")
 	}
 
 	cli, d, cleanup := setupTestEnvironment(t)
@@ -2954,6 +2954,638 @@ func TestResetAgentDefinitions(t *testing.T) {
 		}
 		if len(entries) == 0 {
 			t.Error("agents directory should contain template files after reset")
+		}
+	})
+}
+
+// TestCLISetCurrentRepo tests the setCurrentRepo command
+func TestCLISetCurrentRepo(t *testing.T) {
+	cli, d, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Add a test repo to daemon's state via socket
+	client := socket.NewClient(d.GetPaths().DaemonSock)
+	_, err := client.Send(socket.Request{
+		Command: "add_repo",
+		Args: map[string]interface{}{
+			"name":         "test-repo",
+			"github_url":   "https://github.com/test/repo",
+			"tmux_session": "mc-test-repo",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to add repo via socket: %v", err)
+	}
+
+	t.Run("sets current repo successfully", func(t *testing.T) {
+		err := cli.setCurrentRepo([]string{"test-repo"})
+		if err != nil {
+			t.Fatalf("setCurrentRepo() error = %v", err)
+		}
+
+		// Verify it was set via daemon
+		resp, err := client.Send(socket.Request{Command: "get_current_repo"})
+		if err != nil {
+			t.Fatalf("Failed to get current repo: %v", err)
+		}
+		if currentRepo, ok := resp.Data.(string); !ok || currentRepo != "test-repo" {
+			t.Errorf("CurrentRepo = %v, want test-repo", resp.Data)
+		}
+	})
+
+	t.Run("returns error when no repo name provided", func(t *testing.T) {
+		err := cli.setCurrentRepo([]string{})
+		if err == nil {
+			t.Error("setCurrentRepo() should return error when no repo name provided")
+		}
+	})
+
+	t.Run("returns error for nonexistent repo", func(t *testing.T) {
+		err := cli.setCurrentRepo([]string{"nonexistent-repo"})
+		if err == nil {
+			t.Error("setCurrentRepo() should return error for nonexistent repo")
+		}
+	})
+}
+
+// TestCLIGetCurrentRepo tests the getCurrentRepo command
+func TestCLIGetCurrentRepo(t *testing.T) {
+	cli, d, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	t.Run("shows message when no repo set", func(t *testing.T) {
+		// Ensure no current repo is set - this should not error,
+		// just show a message
+		err := cli.getCurrentRepo([]string{})
+		// This command prints output but doesn't return an error
+		// when no repo is set, so we just check it doesn't panic
+		_ = err // Ignore error as it may or may not error depending on daemon state
+	})
+
+	t.Run("shows current repo when set", func(t *testing.T) {
+		// Add and set a current repo via daemon
+		client := socket.NewClient(d.GetPaths().DaemonSock)
+		_, err := client.Send(socket.Request{
+			Command: "add_repo",
+			Args: map[string]interface{}{
+				"name":         "test-repo",
+				"github_url":   "https://github.com/test/repo",
+				"tmux_session": "mc-test-repo",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Failed to add repo: %v", err)
+		}
+
+		// Set it as current
+		_, err = client.Send(socket.Request{
+			Command: "set_current_repo",
+			Args:    map[string]interface{}{"name": "test-repo"},
+		})
+		if err != nil {
+			t.Fatalf("Failed to set current repo: %v", err)
+		}
+
+		err = cli.getCurrentRepo([]string{})
+		if err != nil {
+			t.Fatalf("getCurrentRepo() error = %v", err)
+		}
+	})
+}
+
+// TestCLIClearCurrentRepo tests the clearCurrentRepo command
+func TestCLIClearCurrentRepo(t *testing.T) {
+	cli, d, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Set a current repo first
+	st, _ := state.Load(d.GetPaths().StateFile)
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test-repo",
+		Agents:      make(map[string]state.Agent),
+	}
+	st.AddRepo("test-repo", repo)
+	st.CurrentRepo = "test-repo"
+	st.Save()
+
+	t.Run("clears current repo", func(t *testing.T) {
+		err := cli.clearCurrentRepo([]string{})
+		if err != nil {
+			t.Fatalf("clearCurrentRepo() error = %v", err)
+		}
+
+		// Verify it was cleared
+		st, _ := state.Load(d.GetPaths().StateFile)
+		if st.CurrentRepo != "" {
+			t.Errorf("CurrentRepo = %v, want empty string", st.CurrentRepo)
+		}
+	})
+}
+
+// TestRemoveDirectoryIfExists tests the removeDirectoryIfExists helper
+func TestRemoveDirectoryIfExists(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "test-remove-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	t.Run("removes existing directory", func(t *testing.T) {
+		testDir := filepath.Join(tmpDir, "test-dir")
+		if err := os.Mkdir(testDir, 0755); err != nil {
+			t.Fatalf("Failed to create test dir: %v", err)
+		}
+
+		removeDirectoryIfExists(testDir, "test directory")
+
+		if _, err := os.Stat(testDir); !os.IsNotExist(err) {
+			t.Error("Directory should be removed")
+		}
+	})
+
+	t.Run("handles nonexistent directory gracefully", func(t *testing.T) {
+		nonexistentDir := filepath.Join(tmpDir, "nonexistent")
+		// Should not panic or error
+		removeDirectoryIfExists(nonexistentDir, "nonexistent directory")
+	})
+}
+
+// TestCLIAddWorkspace tests the addWorkspace command
+func TestCLIAddWorkspace(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Create and add a test repo
+	repoName := "workspace-test-repo"
+
+	t.Run("returns error for invalid workspace name", func(t *testing.T) {
+		err := cli.addWorkspace([]string{"invalid name with spaces", "--repo", repoName})
+		if err == nil {
+			t.Error("addWorkspace() should return error for invalid name")
+		}
+	})
+
+	t.Run("returns error when no name provided", func(t *testing.T) {
+		err := cli.addWorkspace([]string{"--repo", repoName})
+		if err == nil {
+			t.Error("addWorkspace() should return error when no name provided")
+		}
+	})
+
+	// Note: Full workspace creation requires tmux and proper daemon state,
+	// which is tested in integration tests. Here we test the validation logic.
+}
+
+// TestCLIRemoveWorkspace tests the removeWorkspace command
+func TestCLIRemoveWorkspace(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repoName := "remove-workspace-test"
+
+	t.Run("returns error when no name provided", func(t *testing.T) {
+		err := cli.removeWorkspace([]string{"--repo", repoName})
+		if err == nil {
+			t.Error("removeWorkspace() should return error when no name provided")
+		}
+	})
+
+	t.Run("returns error for nonexistent workspace", func(t *testing.T) {
+		err := cli.removeWorkspace([]string{"nonexistent-workspace", "--repo", repoName})
+		if err == nil {
+			t.Error("removeWorkspace() should return error for nonexistent workspace")
+		}
+	})
+
+	// Note: Full workspace removal requires tmux and proper daemon state,
+	// which is tested in integration tests. Here we test the validation logic.
+}
+
+// TestCLIShowHistory tests the showHistory command
+func TestCLIShowHistory(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repoName := "history-test-repo"
+
+	t.Run("returns error for invalid status filter", func(t *testing.T) {
+		err := cli.showHistory([]string{"--repo", repoName, "--status", "invalid"})
+		if err == nil {
+			t.Error("showHistory() should return error for invalid status filter")
+		}
+	})
+
+	// Note: Full history display requires daemon state with task history,
+	// which is tested in integration tests. Here we test the validation logic.
+}
+
+// TestCLIGetPRStatusForBranch tests the getPRStatusForBranch helper
+func TestCLIGetPRStatusForBranch(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// Create a test repo
+	repoPath := cli.paths.RepoDir("pr-status-test")
+	setupTestRepo(t, repoPath)
+
+	t.Run("returns existing PR URL when provided", func(t *testing.T) {
+		status, link := cli.getPRStatusForBranch(repoPath, "test-branch", "https://github.com/test/repo/pull/123")
+		if status != "unknown" {
+			t.Errorf("status = %v, want unknown", status)
+		}
+		if link != "#123" {
+			t.Errorf("link = %v, want #123", link)
+		}
+	})
+
+	t.Run("returns no-pr when branch is empty", func(t *testing.T) {
+		status, link := cli.getPRStatusForBranch(repoPath, "", "")
+		if status != "no-pr" {
+			t.Errorf("status = %v, want no-pr", status)
+		}
+		if link != "" {
+			t.Errorf("link = %v, want empty", link)
+		}
+	})
+
+	t.Run("handles branch with no PR", func(t *testing.T) {
+		status, link := cli.getPRStatusForBranch(repoPath, "nonexistent-branch", "")
+		if status != "no-pr" {
+			t.Errorf("status = %v, want no-pr", status)
+		}
+		if link != "" {
+			t.Errorf("link = %v, want empty", link)
+		}
+	})
+}
+
+// TestParseDuration tests the parseDuration utility function
+func TestParseDuration(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		want      time.Duration
+		wantError bool
+	}{
+		{
+			name:      "days",
+			input:     "7d",
+			want:      7 * 24 * time.Hour,
+			wantError: false,
+		},
+		{
+			name:      "hours",
+			input:     "24h",
+			want:      24 * time.Hour,
+			wantError: false,
+		},
+		{
+			name:      "minutes",
+			input:     "30m",
+			want:      30 * time.Minute,
+			wantError: false,
+		},
+		{
+			name:      "single day",
+			input:     "1d",
+			want:      24 * time.Hour,
+			wantError: false,
+		},
+		{
+			name:      "single hour",
+			input:     "1h",
+			want:      time.Hour,
+			wantError: false,
+		},
+		{
+			name:      "single minute",
+			input:     "1m",
+			want:      time.Minute,
+			wantError: false,
+		},
+		{
+			name:      "too short",
+			input:     "5",
+			wantError: true,
+		},
+		{
+			name:      "empty",
+			input:     "",
+			wantError: true,
+		},
+		{
+			name:      "unknown unit",
+			input:     "10s",
+			wantError: true,
+		},
+		{
+			name:      "invalid number",
+			input:     "abcd",
+			wantError: true,
+		},
+		{
+			name:      "zero value",
+			input:     "0d",
+			want:      0,
+			wantError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseDuration(tt.input)
+			if tt.wantError {
+				if err == nil {
+					t.Errorf("parseDuration(%q) expected error, got %v", tt.input, got)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("parseDuration(%q) unexpected error: %v", tt.input, err)
+				}
+				if got != tt.want {
+					t.Errorf("parseDuration(%q) = %v, want %v", tt.input, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestCLIListMessages tests the listMessages command
+func TestCLIListMessages(t *testing.T) {
+	cli, d, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repoName := "msg-list-repo"
+	paths := d.GetPaths()
+
+	// Add a repo and agents
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/msg-list-repo",
+		TmuxSession: "mc-msg-list-repo",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.GetState().AddRepo(repoName, repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	worker := state.Agent{
+		Type:         state.AgentTypeWorker,
+		WorktreePath: filepath.Join(paths.WorktreesDir, repoName, "msg-worker"),
+		TmuxWindow:   "msg-worker",
+		Task:         "Test task",
+		CreatedAt:    time.Now(),
+	}
+	if err := d.GetState().AddAgent(repoName, "msg-worker", worker); err != nil {
+		t.Fatalf("Failed to add worker: %v", err)
+	}
+
+	// Create the worktree directory
+	worktreeDir := filepath.Join(paths.WorktreesDir, repoName, "msg-worker")
+	if err := os.MkdirAll(worktreeDir, 0755); err != nil {
+		t.Fatalf("Failed to create worktree dir: %v", err)
+	}
+
+	// Save current directory
+	origDir, _ := os.Getwd()
+	defer os.Chdir(origDir)
+
+	t.Run("lists empty messages", func(t *testing.T) {
+		if err := os.Chdir(worktreeDir); err != nil {
+			t.Fatalf("Failed to change to worktree: %v", err)
+		}
+
+		err := cli.listMessages([]string{})
+		if err != nil {
+			t.Errorf("listMessages() unexpected error: %v", err)
+		}
+	})
+
+	t.Run("lists messages after sending", func(t *testing.T) {
+		// Send a message to the worker
+		msgMgr := messages.NewManager(paths.MessagesDir)
+		_, err := msgMgr.Send(repoName, "supervisor", "msg-worker", "Test message for listing")
+		if err != nil {
+			t.Fatalf("Failed to send message: %v", err)
+		}
+
+		if err := os.Chdir(worktreeDir); err != nil {
+			t.Fatalf("Failed to change to worktree: %v", err)
+		}
+
+		err = cli.listMessages([]string{})
+		if err != nil {
+			t.Errorf("listMessages() unexpected error: %v", err)
+		}
+	})
+}
+
+// TestCLIReadMessage tests the readMessage command
+func TestCLIReadMessage(t *testing.T) {
+	cli, d, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repoName := "msg-read-repo"
+	paths := d.GetPaths()
+
+	// Add a repo and agents
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/msg-read-repo",
+		TmuxSession: "mc-msg-read-repo",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.GetState().AddRepo(repoName, repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	worker := state.Agent{
+		Type:         state.AgentTypeWorker,
+		WorktreePath: filepath.Join(paths.WorktreesDir, repoName, "read-worker"),
+		TmuxWindow:   "read-worker",
+		Task:         "Test task",
+		CreatedAt:    time.Now(),
+	}
+	if err := d.GetState().AddAgent(repoName, "read-worker", worker); err != nil {
+		t.Fatalf("Failed to add worker: %v", err)
+	}
+
+	// Create the worktree directory
+	worktreeDir := filepath.Join(paths.WorktreesDir, repoName, "read-worker")
+	if err := os.MkdirAll(worktreeDir, 0755); err != nil {
+		t.Fatalf("Failed to create worktree dir: %v", err)
+	}
+
+	// Save current directory
+	origDir, _ := os.Getwd()
+	defer os.Chdir(origDir)
+
+	t.Run("returns error without message ID", func(t *testing.T) {
+		if err := os.Chdir(worktreeDir); err != nil {
+			t.Fatalf("Failed to change to worktree: %v", err)
+		}
+
+		err := cli.readMessage([]string{})
+		if err == nil {
+			t.Error("readMessage() should return error without message ID")
+		}
+	})
+
+	t.Run("reads message successfully", func(t *testing.T) {
+		// Send a message
+		msgMgr := messages.NewManager(paths.MessagesDir)
+		msg, err := msgMgr.Send(repoName, "supervisor", "read-worker", "Message to be read")
+		if err != nil {
+			t.Fatalf("Failed to send message: %v", err)
+		}
+
+		if err := os.Chdir(worktreeDir); err != nil {
+			t.Fatalf("Failed to change to worktree: %v", err)
+		}
+
+		err = cli.readMessage([]string{msg.ID})
+		if err != nil {
+			t.Errorf("readMessage() unexpected error: %v", err)
+		}
+
+		// Verify status was updated to read
+		updatedMsg, _ := msgMgr.Get(repoName, "read-worker", msg.ID)
+		if updatedMsg.Status != messages.StatusRead {
+			t.Errorf("Message status = %v, want %v", updatedMsg.Status, messages.StatusRead)
+		}
+	})
+
+	t.Run("returns error for nonexistent message", func(t *testing.T) {
+		if err := os.Chdir(worktreeDir); err != nil {
+			t.Fatalf("Failed to change to worktree: %v", err)
+		}
+
+		err := cli.readMessage([]string{"nonexistent-msg-id"})
+		if err == nil {
+			t.Error("readMessage() should return error for nonexistent message")
+		}
+	})
+}
+
+// TestCLIAckMessage tests the ackMessage command
+func TestCLIAckMessage(t *testing.T) {
+	cli, d, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	repoName := "msg-ack-repo"
+	paths := d.GetPaths()
+
+	// Add a repo and agents
+	repo := &state.Repository{
+		GithubURL:   "https://github.com/test/msg-ack-repo",
+		TmuxSession: "mc-msg-ack-repo",
+		Agents:      make(map[string]state.Agent),
+	}
+	if err := d.GetState().AddRepo(repoName, repo); err != nil {
+		t.Fatalf("Failed to add repo: %v", err)
+	}
+
+	worker := state.Agent{
+		Type:         state.AgentTypeWorker,
+		WorktreePath: filepath.Join(paths.WorktreesDir, repoName, "ack-worker"),
+		TmuxWindow:   "ack-worker",
+		Task:         "Test task",
+		CreatedAt:    time.Now(),
+	}
+	if err := d.GetState().AddAgent(repoName, "ack-worker", worker); err != nil {
+		t.Fatalf("Failed to add worker: %v", err)
+	}
+
+	// Create the worktree directory
+	worktreeDir := filepath.Join(paths.WorktreesDir, repoName, "ack-worker")
+	if err := os.MkdirAll(worktreeDir, 0755); err != nil {
+		t.Fatalf("Failed to create worktree dir: %v", err)
+	}
+
+	// Save current directory
+	origDir, _ := os.Getwd()
+	defer os.Chdir(origDir)
+
+	t.Run("returns error without message ID", func(t *testing.T) {
+		if err := os.Chdir(worktreeDir); err != nil {
+			t.Fatalf("Failed to change to worktree: %v", err)
+		}
+
+		err := cli.ackMessage([]string{})
+		if err == nil {
+			t.Error("ackMessage() should return error without message ID")
+		}
+	})
+
+	t.Run("acknowledges message successfully", func(t *testing.T) {
+		// Send a message
+		msgMgr := messages.NewManager(paths.MessagesDir)
+		msg, err := msgMgr.Send(repoName, "supervisor", "ack-worker", "Message to be acked")
+		if err != nil {
+			t.Fatalf("Failed to send message: %v", err)
+		}
+
+		if err := os.Chdir(worktreeDir); err != nil {
+			t.Fatalf("Failed to change to worktree: %v", err)
+		}
+
+		err = cli.ackMessage([]string{msg.ID})
+		if err != nil {
+			t.Errorf("ackMessage() unexpected error: %v", err)
+		}
+
+		// Verify status was updated to acked
+		updatedMsg, _ := msgMgr.Get(repoName, "ack-worker", msg.ID)
+		if updatedMsg.Status != messages.StatusAcked {
+			t.Errorf("Message status = %v, want %v", updatedMsg.Status, messages.StatusAcked)
+		}
+	})
+
+	t.Run("returns error for nonexistent message", func(t *testing.T) {
+		if err := os.Chdir(worktreeDir); err != nil {
+			t.Fatalf("Failed to change to worktree: %v", err)
+		}
+
+		err := cli.ackMessage([]string{"nonexistent-msg-id"})
+		if err == nil {
+			t.Error("ackMessage() should return error for nonexistent message")
+		}
+	})
+}
+
+// TestGetClaudeBinaryFunction tests the getClaudeBinary function
+func TestGetClaudeBinaryFunction(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	// This test checks that getClaudeBinary uses exec.LookPath
+	// If claude is not installed, it returns an error
+	binary, err := cli.getClaudeBinary()
+	if err != nil {
+		// This is expected in CI environments where claude is not installed
+		// The error should be a ClaudeNotFound error
+		if !strings.Contains(err.Error(), "claude") {
+			t.Errorf("getClaudeBinary() error should mention claude: %v", err)
+		}
+	} else {
+		// If we found it, the path should be non-empty
+		if binary == "" {
+			t.Error("getClaudeBinary() returned empty path without error")
+		}
+	}
+}
+
+// TestLoadStateFunction tests the loadState function
+func TestLoadStateFunction(t *testing.T) {
+	cli, _, cleanup := setupTestEnvironment(t)
+	defer cleanup()
+
+	t.Run("loads state successfully", func(t *testing.T) {
+		st, err := cli.loadState()
+		if err != nil {
+			t.Errorf("loadState() unexpected error: %v", err)
+		}
+		if st == nil {
+			t.Error("loadState() should return non-nil state")
 		}
 	})
 }

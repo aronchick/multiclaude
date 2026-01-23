@@ -264,10 +264,7 @@ func (d *Daemon) checkAgentHealth() {
 				d.logger.Error("Failed to restore repo %s: %v, marking all agents for cleanup", repoName, err)
 				// Only mark for cleanup if restoration failed
 				for agentName := range repo.Agents {
-					if deadAgents[repoName] == nil {
-						deadAgents[repoName] = []string{}
-					}
-					deadAgents[repoName] = append(deadAgents[repoName], agentName)
+					appendToSliceMap(deadAgents, repoName, agentName)
 				}
 			} else {
 				d.logger.Info("Successfully restored tmux session and agents for repo %s", repoName)
@@ -280,10 +277,7 @@ func (d *Daemon) checkAgentHealth() {
 			// Check if agent is marked as ready for cleanup
 			if agent.ReadyForCleanup {
 				d.logger.Info("Agent %s is ready for cleanup", agentName)
-				if deadAgents[repoName] == nil {
-					deadAgents[repoName] = []string{}
-				}
-				deadAgents[repoName] = append(deadAgents[repoName], agentName)
+				appendToSliceMap(deadAgents, repoName, agentName)
 				continue
 			}
 
@@ -296,10 +290,7 @@ func (d *Daemon) checkAgentHealth() {
 
 			if !hasWindow {
 				d.logger.Warn("Agent %s window not found, marking for cleanup", agentName)
-				if deadAgents[repoName] == nil {
-					deadAgents[repoName] = []string{}
-				}
-				deadAgents[repoName] = append(deadAgents[repoName], agentName)
+				appendToSliceMap(deadAgents, repoName, agentName)
 				continue
 			}
 
@@ -308,8 +299,8 @@ func (d *Daemon) checkAgentHealth() {
 				if !isProcessAlive(agent.PID) {
 					d.logger.Warn("Agent %s process (PID %d) not running", agentName, agent.PID)
 
-					// For persistent agents (supervisor, merge-queue, workspace, generic-persistent), attempt auto-restart
-					if agent.Type == state.AgentTypeSupervisor || agent.Type == state.AgentTypeMergeQueue || agent.Type == state.AgentTypeWorkspace || agent.Type == state.AgentTypeGenericPersistent {
+					// For persistent agents, attempt auto-restart
+					if agent.Type.IsPersistent() {
 						d.logger.Info("Attempting to auto-restart agent %s", agentName)
 						if err := d.restartAgent(repoName, agentName, agent, repo); err != nil {
 							d.logger.Error("Failed to restart agent %s: %v", agentName, err)
@@ -2056,6 +2047,14 @@ func isProcessAlive(pid int) bool {
 	// Send signal 0 to check if process exists (doesn't actually signal, just checks)
 	err = process.Signal(syscall.Signal(0))
 	return err == nil
+}
+
+// appendToSliceMap appends a value to a slice in a map, initializing the slice if needed.
+func appendToSliceMap(m map[string][]string, key, value string) {
+	if m[key] == nil {
+		m[key] = []string{}
+	}
+	m[key] = append(m[key], value)
 }
 
 // Run runs the daemon in the foreground
