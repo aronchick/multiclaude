@@ -490,7 +490,7 @@ func (c *CLI) registerCommands() {
 	c.rootCmd.Subcommands["history"] = &Command{
 		Name:        "history",
 		Description: "Show task history for a repository",
-		Usage:       "multiclaude history [--repo <repo>] [-n <count>] [--status <status>] [--search <query>] [--full]",
+		Usage:       "multiclaude history [--repo <repo>] [-n <count>] [--status <status>] [--search <query>]",
 		Run:         c.showHistory,
 	}
 
@@ -2201,7 +2201,6 @@ func (c *CLI) showHistory(args []string) error {
 	// Get filter options
 	statusFilter := flags["status"] // Filter by status (merged, open, closed, failed, no-pr)
 	searchQuery := flags["search"]  // Search in task descriptions
-	showFull := flags["full"] == "true"
 
 	// Validate status filter if provided
 	validStatuses := map[string]bool{
@@ -2257,15 +2256,6 @@ func (c *CLI) showHistory(args []string) error {
 	format.Header("%s:", strings.Join(headerParts, ", "))
 	fmt.Println()
 
-	// First pass: collect entries with details to show after table
-	type entryDetails struct {
-		name          string
-		summary       string
-		failureReason string
-	}
-	var detailsToShow []entryDetails
-
-	table := format.NewColoredTable("NAME", "STATUS", "PR", "COMPLETED", "TASK")
 	displayedCount := 0
 	for _, item := range history {
 		// Stop once we've displayed enough
@@ -2288,7 +2278,7 @@ func (c *CLI) showHistory(args []string) error {
 		storedStatus, _ := entry["status"].(string)
 
 		// Try to get PR status from GitHub if we have a branch
-		prStatus, prLink := c.getPRStatusForBranch(repoPath, branch, prURL)
+		prStatus, _ := c.getPRStatusForBranch(repoPath, branch, prURL)
 
 		// Use stored status if it indicates failure
 		if storedStatus == "failed" {
@@ -2318,58 +2308,60 @@ func (c *CLI) showHistory(args []string) error {
 
 		displayedCount++
 
-		// Collect entries with summary or failure for detailed display
-		if summary != "" || failureReason != "" {
-			detailsToShow = append(detailsToShow, entryDetails{
-				name:          name,
-				summary:       summary,
-				failureReason: failureReason,
-			})
+		// Display entry as a list item
+		format.Bold.Printf("[%s]\n", name)
+
+		// Show task/request (max 4 lines)
+		taskLines := strings.Split(task, "\n")
+		displayLines := taskLines
+		if len(taskLines) > 4 {
+			displayLines = taskLines[:4]
+		}
+		for _, line := range displayLines {
+			fmt.Printf("  %s\n", line)
+		}
+		if len(taskLines) > 4 {
+			format.Dimmed("  ... (%d more lines)", len(taskLines)-4)
 		}
 
-		// Format status with color
-		var statusCell format.ColoredCell
+		// Show status with color
+		fmt.Print("  Status: ")
 		switch prStatus {
 		case "merged":
-			statusCell = format.ColorCell("merged", format.Green)
+			format.Green.Println("merged")
 		case "open":
-			statusCell = format.ColorCell("open", format.Yellow)
+			format.Yellow.Println("open")
 		case "closed":
-			statusCell = format.ColorCell("closed", format.Red)
+			format.Red.Println("closed")
 		case "failed":
-			statusCell = format.ColorCell("failed", format.Red)
+			format.Red.Println("failed")
 		default:
-			statusCell = format.ColorCell("no-pr", format.Dim)
+			format.Dim.Println("no-pr")
 		}
 
-		// Format PR link
-		prCell := format.ColorCell("-", format.Dim)
-		if prLink != "" {
-			// Extract just the PR number for display
-			prCell = format.ColorCell(prLink, format.Cyan)
+		// Show PR URL if available
+		if prURL != "" {
+			format.Cyan.Printf("  PR: %s\n", prURL)
+		} else {
+			format.Dimmed("  PR: none")
 		}
 
-		// Format completed time
-		completedCell := format.ColorCell("-", format.Dim)
+		// Show completed time
 		if completedAt != "" {
 			if t, err := time.Parse(time.RFC3339, completedAt); err == nil {
-				completedCell = format.Cell(format.TimeAgo(t))
+				fmt.Printf("  Completed: %s\n", format.TimeAgo(t))
 			}
 		}
 
-		// Format task - show full or truncate
-		displayTask := task
-		if !showFull {
-			displayTask = format.Truncate(task, 50)
+		// Show summary or failure reason
+		if summary != "" {
+			fmt.Printf("  Summary: %s\n", summary)
+		}
+		if failureReason != "" {
+			format.Red.Printf("  Failure: %s\n", failureReason)
 		}
 
-		table.AddRow(
-			format.Cell(name),
-			statusCell,
-			prCell,
-			completedCell,
-			format.Cell(displayTask),
-		)
+		fmt.Println() // Blank line between entries
 	}
 
 	// Show message if no results after filtering
@@ -2378,23 +2370,6 @@ func (c *CLI) showHistory(args []string) error {
 			fmt.Printf("No tasks match the filter criteria\n")
 		}
 		return nil
-	}
-
-	table.Print()
-
-	// Print detailed summary/failure section if any entries have them
-	if len(detailsToShow) > 0 {
-		fmt.Println()
-		format.Header("Details:")
-		for _, d := range detailsToShow {
-			format.Bold.Printf("\n%s:\n", d.name)
-			if d.summary != "" {
-				format.Dimmed("  Summary: %s", d.summary)
-			}
-			if d.failureReason != "" {
-				format.Red.Printf("  Failure: %s\n", d.failureReason)
-			}
-		}
 	}
 
 	return nil
