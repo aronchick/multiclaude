@@ -113,29 +113,29 @@ type Agent struct {
 
 // UpstreamConfig holds configuration for fork/upstream tracking
 type UpstreamConfig struct {
-	UpstreamURL    string `json:"upstream_url"`     // e.g., "https://github.com/dlorenc/multiclaude"
-	UpstreamRemote string `json:"upstream_remote"`  // Usually "upstream"
-	ForkRemote     string `json:"fork_remote"`      // Usually "origin"
-	SyncEnabled    bool   `json:"sync_enabled"`     // Enable fork/upstream sync
-	SyncInterval   int    `json:"sync_interval"`    // Minutes between sync checks (default: 30)
+	UpstreamURL    string `json:"upstream_url"`    // e.g., "https://github.com/dlorenc/multiclaude"
+	UpstreamRemote string `json:"upstream_remote"` // Usually "upstream"
+	ForkRemote     string `json:"fork_remote"`     // Usually "origin"
+	SyncEnabled    bool   `json:"sync_enabled"`    // Enable fork/upstream sync
+	SyncInterval   int    `json:"sync_interval"`   // Minutes between sync checks (default: 30)
 }
 
 // CILayerStatus represents CI status for one layer (fork or upstream)
 type CILayerStatus struct {
-	Status       string     `json:"status"`                   // "passing", "failing", "pending", "unknown"
-	LastCheck    time.Time  `json:"last_check"`               // When we last checked
-	LastCommit   string     `json:"last_commit"`              // SHA of last checked commit
-	FailingSince *time.Time `json:"failing_since,omitempty"`  // When did it start failing
-	CheckURL     string     `json:"check_url,omitempty"`      // GH Actions URL
+	Status       string     `json:"status"`                  // "passing", "failing", "pending", "unknown"
+	LastCheck    time.Time  `json:"last_check"`              // When we last checked
+	LastCommit   string     `json:"last_commit"`             // SHA of last checked commit
+	FailingSince *time.Time `json:"failing_since,omitempty"` // When did it start failing
+	CheckURL     string     `json:"check_url,omitempty"`     // GH Actions URL
 }
 
 // DualCIStatus tracks CI status at both fork and upstream layers
 type DualCIStatus struct {
 	ForkCI          CILayerStatus `json:"fork_ci"`
 	UpstreamCI      CILayerStatus `json:"upstream_ci"`
-	LastSyncTime    time.Time     `json:"last_sync_time"`    // Last time we synced with upstream
-	LastSyncSHA     string        `json:"last_sync_sha"`     // Last upstream commit synced
-	DivergenceCount int           `json:"divergence_count"`  // Commits fork is behind upstream
+	LastSyncTime    time.Time     `json:"last_sync_time"`   // Last time we synced with upstream
+	LastSyncSHA     string        `json:"last_sync_sha"`    // Last upstream commit synced
+	DivergenceCount int           `json:"divergence_count"` // Commits fork is behind upstream
 }
 
 // Repository represents a tracked repository's state
@@ -146,8 +146,8 @@ type Repository struct {
 	TaskHistory      []TaskHistoryEntry `json:"task_history,omitempty"`
 	MergeQueueConfig MergeQueueConfig   `json:"merge_queue_config,omitempty"`
 	// Dual-layer CI tracking for fork/upstream workflows
-	UpstreamConfig   *UpstreamConfig    `json:"upstream_config,omitempty"`
-	DualCIStatus     *DualCIStatus      `json:"dual_ci_status,omitempty"`
+	UpstreamConfig *UpstreamConfig `json:"upstream_config,omitempty"`
+	DualCIStatus   *DualCIStatus   `json:"dual_ci_status,omitempty"`
 }
 
 // State represents the entire daemon state
