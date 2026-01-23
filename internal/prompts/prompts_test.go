@@ -342,7 +342,7 @@ func TestGetSlashCommandsPromptContainsCLICommands(t *testing.T) {
 		command     string
 		description string
 	}{
-		{"multiclaude work list", "/workers should include work list command"},
+		{"multiclaude worker list", "/workers should include worker list command"},
 	}
 
 	// Commands expected in /messages

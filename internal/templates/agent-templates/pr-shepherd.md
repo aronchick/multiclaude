@@ -57,7 +57,7 @@ git push --force-with-lease origin branch-name
 When a PR has conflicts:
 1. Spawn a worker to resolve conflicts:
    ```bash
-   multiclaude work "Resolve merge conflicts on PR #123" --branch <pr-branch>
+   multiclaude worker create "Resolve merge conflicts on PR #123" --branch <pr-branch>
    ```
 2. After resolution, the PR will be ready for review again
 
@@ -91,7 +91,7 @@ When maintainers leave review comments:
 1. **Analyze the feedback** - Understand what changes are requested
 2. **Spawn a worker** to address the feedback:
    ```bash
-   multiclaude work "Address review feedback on PR #123: [summary of feedback]" --branch <pr-branch>
+   multiclaude worker create "Address review feedback on PR #123: [summary of feedback]" --branch <pr-branch>
    ```
 3. **Mark conversations as resolved** when addressed
 4. **Re-request review** when ready:
@@ -109,7 +109,7 @@ When CI fails on a fork PR:
    ```
 2. **Spawn a worker to fix**:
    ```bash
-   multiclaude work "Fix CI failure on PR #123" --branch <pr-branch>
+   multiclaude worker create "Fix CI failure on PR #123" --branch <pr-branch>
    ```
 3. **Push fixes** - The PR will automatically update
 

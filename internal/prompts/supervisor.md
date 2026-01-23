@@ -54,7 +54,7 @@ Parameters:
 - `--prompt-file`: Path to the file containing the agent's prompt
 - `--task`: Optional task description for ephemeral agents
 
-**For workers**: Use the simpler `multiclaude work "<task>"` command - it handles prompt loading automatically.
+**For workers**: Use the simpler `multiclaude worker create "<task>"` command - it handles prompt loading automatically.
 
 **For merge-queue**: When spawning, the daemon will include the tracking mode configuration in the definition. Check the "Merge Queue Configuration" section in the definitions message.
 

@@ -101,7 +101,7 @@ When main branch CI is failing:
    ```
 3. **Spawn investigation worker** - Create a worker to investigate and fix the issue:
    ```bash
-   multiclaude work "URGENT: Investigate and fix main branch CI failure"
+   multiclaude worker create "URGENT: Investigate and fix main branch CI failure"
    ```
 4. **Prioritize the fix** - The fix PR should be fast-tracked and merged as soon as CI passes
 
@@ -142,8 +142,8 @@ Use these commands to manage the merge queue:
 - `gh pr list --label multiclaude` - List all multiclaude PRs
 - `gh pr status` - Check PR status
 - `gh pr checks <pr-number>` - View CI checks for a PR
-- `multiclaude work "Fix CI for PR #123" --branch <pr-branch>` - Spawn a worker to fix issues
-- `multiclaude work "URGENT: Investigate and fix main branch CI failure"` - Spawn emergency fix worker
+- `multiclaude worker create "Fix CI for PR #123" --branch <pr-branch>` - Spawn a worker to fix issues
+- `multiclaude worker create "URGENT: Investigate and fix main branch CI failure"` - Spawn emergency fix worker
 
 Check .multiclaude/REVIEWER.md for repository-specific merge criteria.
 
@@ -237,7 +237,7 @@ gh api repos/{owner}/{repo}/pulls/<pr-number>/comments
 
 - **Changes Requested**: Spawn a worker to address the feedback:
   ```bash
-  multiclaude work "Address review feedback on PR #123" --branch <pr-branch>
+  multiclaude worker create "Address review feedback on PR #123" --branch <pr-branch>
   ```
 - **Unresolved Comments**: The worker must respond to or resolve each comment
 - **Pending Review Requests**: Wait for reviewers, or ask supervisor if blocking too long
@@ -348,7 +348,7 @@ When a PR is rejected by human review or deemed unsalvageable, handle it gracefu
 
 3. **Spawn a new worker** to try an alternative approach:
    ```bash
-   multiclaude work "Try alternative approach for issue #<issue-number>: [brief description]"
+   multiclaude worker create "Try alternative approach for issue #<issue-number>: [brief description]"
    ```
 
 4. **Notify the supervisor**:
@@ -417,7 +417,7 @@ Resume processing when any of these signals occur:
 When resuming:
 ```bash
 gh pr edit <pr-number> --remove-label "needs-human-input"
-multiclaude work "Resume work on PR #<pr-number> after human input" --branch <pr-branch>
+multiclaude worker create "Resume work on PR #<pr-number> after human input" --branch <pr-branch>
 ```
 
 ### Tracking Blocked PRs
@@ -508,7 +508,7 @@ Based on the summary:
 **If blocking issues found:**
 1. Spawn a worker to fix the issues:
    ```bash
-   multiclaude work "Fix blocking issues from review: [list issues]" --branch <pr-branch>
+   multiclaude worker create "Fix blocking issues from review: [list issues]" --branch <pr-branch>
    ```
 2. After the fix PR is created, spawn another review if needed
 3. Once all blocking issues are resolved, proceed with merge
@@ -576,7 +576,7 @@ Before deleting any branch, you MUST verify no active work is using it:
 
 ```bash
 # Check if branch has an active worktree
-multiclaude work list
+multiclaude worker list
 
 # Check for any active agents using this branch
 # Look for the branch name in the worker list output
@@ -638,7 +638,7 @@ git push origin --delete <branch-name>  # Delete remote
 
 3. **Verify no active work:**
    ```bash
-   multiclaude work list
+   multiclaude worker list
    # Ensure no worker is using this branch
    ```
 
@@ -669,7 +669,7 @@ git fetch --prune origin
 branches=$(git branch -r --list "origin/multiclaude/*" "origin/work/*" | sed 's|origin/||')
 
 # Check active workers
-multiclaude work list
+multiclaude worker list
 
 # For each branch, check and clean
 for branch in $branches; do

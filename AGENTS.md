@@ -55,7 +55,7 @@ This is the most complex agent with multiple responsibilities:
 | Check CI | `gh run list --branch main`, `gh pr checks <n>` |
 | Verify reviews | `gh pr view <n> --json reviews,reviewRequests` |
 | Merge PRs | `gh pr merge <n> --squash` |
-| Spawn fix workers | `multiclaude work "Fix CI for PR #N"` |
+| Spawn fix workers | `multiclaude worker create "Fix CI for PR #N"` |
 | Handle emergencies | Enter "emergency fix mode" when main is broken |
 
 **Critical behaviors:**
@@ -289,7 +289,7 @@ CLI docs are auto-generated via `go generate ./pkg/config`.
 ### Spawn Flow (Worker Example)
 
 ```
-CLI: multiclaude work "task description"
+CLI: multiclaude worker create "task description"
          ↓
 1. Generate unique name (adjective-animal pattern)
 2. Create git worktree at ~/.multiclaude/wts/<repo>/<name>

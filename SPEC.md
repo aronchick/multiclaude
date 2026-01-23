@@ -225,7 +225,7 @@ CLI communicates with daemon via Unix socket at `~/.multiclaude/daemon.sock`.
 
 ### Worker Creation
 
-`multiclaude work "task description"`
+`multiclaude worker create "task description"`
 
 1. Generate Docker-style name
 2. Create worktree from main (or `--branch`)
@@ -242,7 +242,7 @@ CLI communicates with daemon via Unix socket at `~/.multiclaude/daemon.sock`.
 
 ### Worker Removal
 
-`multiclaude work rm <name>`
+`multiclaude worker rm <name>`
 
 1. Check for uncommitted changes (warn if found)
 2. Check for unpushed commits (warn if found)

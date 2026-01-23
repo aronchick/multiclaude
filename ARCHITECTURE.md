@@ -339,7 +339,7 @@ CLI                          Daemon                       System
 ### Worker Creation
 
 ```
-User: multiclaude work "Add unit tests"
+User: multiclaude worker create "Add unit tests"
 
 CLI                          Daemon                       System
  │                              │                            │

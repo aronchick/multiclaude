@@ -168,7 +168,7 @@ func AgentNotFound(agentType, name, repo string) *CLIError {
 	return &CLIError{
 		Category:   CategoryNotFound,
 		Message:    fmt.Sprintf("%s '%s' not found in repository '%s'", agentType, name, repo),
-		Suggestion: fmt.Sprintf("multiclaude work list --repo %s", repo),
+		Suggestion: fmt.Sprintf("multiclaude worker list --repo %s", repo),
 	}
 }
 
@@ -352,7 +352,7 @@ func NoWorkersFound(repo string) *CLIError {
 	return &CLIError{
 		Category:   CategoryNotFound,
 		Message:    fmt.Sprintf("no workers found in repo '%s'", repo),
-		Suggestion: fmt.Sprintf("multiclaude work \"<task>\" --repo %s", repo),
+		Suggestion: fmt.Sprintf("multiclaude worker create \"<task>\" --repo %s", repo),
 	}
 }
 
@@ -370,7 +370,7 @@ func NoAgentsFound(repo string) *CLIError {
 	return &CLIError{
 		Category:   CategoryNotFound,
 		Message:    fmt.Sprintf("no agents found in repo '%s'", repo),
-		Suggestion: fmt.Sprintf("multiclaude work list --repo %s", repo),
+		Suggestion: fmt.Sprintf("multiclaude worker list --repo %s", repo),
 	}
 }
 

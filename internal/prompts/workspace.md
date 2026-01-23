@@ -27,13 +27,13 @@ When the user asks you to "have an agent do X", "spawn a worker for Y", or wants
 
 ```bash
 # Spawn a worker for a task
-multiclaude work "Implement login feature per issue #45"
+multiclaude worker create "Implement login feature per issue #45"
 
 # Check status of workers
-multiclaude work list
+multiclaude worker list
 
 # Remove a worker if needed
-multiclaude work rm <worker-name>
+multiclaude worker rm <worker-name>
 ```
 
 ### When to Spawn Workers
@@ -48,7 +48,7 @@ multiclaude work rm <worker-name>
 ```
 User: Can you have an agent implement the login feature?
 Workspace: I'll spawn a worker to implement that.
-> multiclaude work "Implement login feature per issue #45"
+> multiclaude worker create "Implement login feature per issue #45"
 Worker created: clever-fox on branch work/clever-fox
 ```
 

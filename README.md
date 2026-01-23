@@ -100,7 +100,7 @@ multiclaude start
 multiclaude init https://github.com/your/repo
 
 # Create a worker to do a task
-multiclaude work "Add unit tests for the auth module"
+multiclaude worker create "Add unit tests for the auth module"
 
 # Watch agents work
 tmux attach -t mc-repo
@@ -176,12 +176,14 @@ multiclaude workspace <name>               # Connect to workspace (shorthand)
 ### Workers
 
 ```bash
-multiclaude work "task description"        # Create worker for task
-multiclaude work "task" --branch feature   # Start from specific branch
-multiclaude work "Fix tests" --branch origin/work/fox --push-to work/fox  # Iterate on existing PR
-multiclaude work list                      # List active workers
-multiclaude work rm <name>                 # Remove worker (warns if uncommitted work)
+multiclaude worker create "task description"        # Create worker for task
+multiclaude worker create "task" --branch feature   # Start from specific branch
+multiclaude worker create "Fix tests" --branch origin/work/fox --push-to work/fox  # Iterate on existing PR
+multiclaude worker list                      # List active workers
+multiclaude worker rm <name>                 # Remove worker (warns if uncommitted work)
 ```
+
+Note: `multiclaude work` is an alias for `multiclaude worker` for backward compatibility.
 
 The `--push-to` flag creates a worker that pushes to an existing branch instead of creating a new PR. Use this when you want to iterate on an existing PR.
 
@@ -247,7 +249,7 @@ When you attach to a repo's tmux session, you'll see multiple windows—one per 
 │  ╭─────────────────────────────────────────────────────────────────────────╮│
 │  │ I'll check on the current workers and see if anyone needs help.        ││
 │  │                                                                         ││
-│  │ > multiclaude work list                                                 ││
+│  │ > multiclaude worker list                                               ││
 │  │ Workers (2):                                                            ││
 │  │   - swift-eagle: working on issue #44                                   ││
 │  │   - calm-deer: working on issue #24                                     ││
@@ -282,14 +284,14 @@ Your workspace is a persistent Claude session where you can spawn and manage wor
 │  ╭─────────────────────────────────────────────────────────────────────────╮│
 │  │ I'll spawn workers for both issues.                                     ││
 │  │                                                                         ││
-│  │ > multiclaude work "Implement rich list commands per issue #44"         ││
+│  │ > multiclaude worker create "Implement rich list commands per issue #44"││
 │  │ ✓ Worker created: swift-eagle (branch: work/swift-eagle)                ││
 │  │                                                                         ││
-│  │ > multiclaude work "Improve error messages per issue #45"               ││
+│  │ > multiclaude worker create "Improve error messages per issue #45"      ││
 │  │ ✓ Worker created: calm-deer (branch: work/calm-deer)                    ││
 │  │                                                                         ││
 │  │ Both workers are now running. You can check on them with:               ││
-│  │   multiclaude work list                                                 ││
+│  │   multiclaude worker list                                               ││
 │  │   multiclaude attach swift-eagle                                        ││
 │  ╰─────────────────────────────────────────────────────────────────────────╯│
 │                                                                             │
@@ -399,7 +401,7 @@ When CI fails, the merge queue can spawn workers to fix it:
 │  │ ✗ Tests failed: 2 failures in error_test.go                             ││
 │  │                                                                         ││
 │  │ Spawning fixup worker for #48...                                        ││
-│  │ > multiclaude work "Fix test failures in PR #48" --branch work/calm-deer││
+│  │ > multiclaude worker create "Fix test failures in PR #48" --branch work/calm-deer││
 │  │ ✓ Worker created: quick-fox                                             ││
 │  │                                                                         ││
 │  │ I'll check back on #48 after quick-fox pushes a fix.                    ││

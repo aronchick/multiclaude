@@ -165,7 +165,7 @@ func TestAgentNotFound(t *testing.T) {
 	if !strings.Contains(formatted, "my-repo") {
 		t.Errorf("expected repo name, got: %s", formatted)
 	}
-	if !strings.Contains(formatted, "multiclaude work list") {
+	if !strings.Contains(formatted, "multiclaude worker list") {
 		t.Errorf("expected list suggestion, got: %s", formatted)
 	}
 }
@@ -507,8 +507,8 @@ func TestNoWorkersFound(t *testing.T) {
 	if !strings.Contains(formatted, "my-repo") {
 		t.Errorf("expected repo name in message, got: %s", formatted)
 	}
-	if !strings.Contains(formatted, "multiclaude work") {
-		t.Errorf("expected work suggestion, got: %s", formatted)
+	if !strings.Contains(formatted, "multiclaude worker create") {
+		t.Errorf("expected worker create suggestion, got: %s", formatted)
 	}
 }
 
@@ -551,8 +551,8 @@ func TestNoAgentsFound(t *testing.T) {
 	if !strings.Contains(formatted, "my-repo") {
 		t.Errorf("expected repo name in message, got: %s", formatted)
 	}
-	if !strings.Contains(formatted, "multiclaude work list") {
-		t.Errorf("expected work list suggestion, got: %s", formatted)
+	if !strings.Contains(formatted, "multiclaude worker list") {
+		t.Errorf("expected worker list suggestion, got: %s", formatted)
 	}
 }
 

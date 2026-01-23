@@ -423,30 +423,40 @@ func (c *CLI) registerCommands() {
 	c.rootCmd.Subcommands["repo"] = repoCmd
 
 	// Worker commands
-	workCmd := &Command{
-		Name:        "work",
+	workerCmd := &Command{
+		Name:        "worker",
 		Description: "Manage worker agents",
-		Usage:       "multiclaude work [<task>] [--repo <repo>] [--branch <branch>] [--push-to <branch>]",
+		Usage:       "multiclaude worker [<task>] [--repo <repo>] [--branch <branch>] [--push-to <branch>]",
 		Subcommands: make(map[string]*Command),
 	}
 
-	workCmd.Run = c.createWorker // Default action for 'work' command
+	workerCmd.Run = c.createWorker // Default action for 'worker' command (same as 'worker create')
 
-	workCmd.Subcommands["list"] = &Command{
+	workerCmd.Subcommands["create"] = &Command{
+		Name:        "create",
+		Description: "Create a new worker agent",
+		Usage:       "multiclaude worker create <task> [--repo <repo>] [--branch <branch>] [--push-to <branch>]",
+		Run:         c.createWorker,
+	}
+
+	workerCmd.Subcommands["list"] = &Command{
 		Name:        "list",
 		Description: "List active workers",
-		Usage:       "multiclaude work list [--repo <repo>]",
+		Usage:       "multiclaude worker list [--repo <repo>]",
 		Run:         c.listWorkers,
 	}
 
-	workCmd.Subcommands["rm"] = &Command{
+	workerCmd.Subcommands["rm"] = &Command{
 		Name:        "rm",
 		Description: "Remove a worker",
-		Usage:       "multiclaude work rm <worker-name>",
+		Usage:       "multiclaude worker rm <worker-name>",
 		Run:         c.removeWorker,
 	}
 
-	c.rootCmd.Subcommands["work"] = workCmd
+	c.rootCmd.Subcommands["worker"] = workerCmd
+
+	// 'work' is an alias for 'worker' (backward compatibility)
+	c.rootCmd.Subcommands["work"] = workerCmd
 
 	// Workspace commands
 	workspaceCmd := &Command{
@@ -1908,7 +1918,7 @@ func (c *CLI) createWorker(args []string) error {
 	// Get task description
 	task := strings.Join(posArgs, " ")
 	if task == "" {
-		return errors.InvalidUsage("usage: multiclaude work <task description>")
+		return errors.InvalidUsage("usage: multiclaude worker create <task description>")
 	}
 
 	// Determine repository
@@ -2194,7 +2204,7 @@ func (c *CLI) listWorkers(args []string) error {
 
 	if len(workers) == 0 {
 		fmt.Printf("No workers in repository '%s'\n", repoName)
-		format.Dimmed("\nCreate a worker with: multiclaude work <task>")
+		format.Dimmed("\nCreate a worker with: multiclaude worker create <task>")
 		return nil
 	}
 
@@ -2475,7 +2485,7 @@ func (c *CLI) showHistory(args []string) error {
 	history, ok := resp.Data.([]interface{})
 	if !ok || len(history) == 0 {
 		fmt.Printf("No task history for repository '%s'\n", repoName)
-		format.Dimmed("\nCreate workers with: multiclaude work <task>")
+		format.Dimmed("\nCreate workers with: multiclaude worker create <task>")
 		return nil
 	}
 

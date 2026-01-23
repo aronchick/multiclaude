@@ -150,10 +150,10 @@ git status  # Check for uncommitted work
 cd ~/.multiclaude/wts/<repo>/<worker-name>
 git stash  # or: git add . && git commit -m "WIP"
 git push -u origin work/<worker-name>
-multiclaude work rm <worker-name>
+multiclaude worker rm <worker-name>
 
 # Option 3: Force remove (lose uncommitted work)
-multiclaude work rm <worker-name>
+multiclaude worker rm <worker-name>
 # Answer 'y' to warnings about uncommitted changes
 ```
 
@@ -276,7 +276,7 @@ multiclaude repair
 
 # Check what remains
 multiclaude list
-multiclaude work list
+multiclaude worker list
 ```
 
 ---
