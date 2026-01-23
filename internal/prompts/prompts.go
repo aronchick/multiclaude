@@ -30,6 +30,9 @@ const TypeWorkspace = state.AgentTypeWorkspace
 // Deprecated: Use state.AgentTypeReview directly.
 const TypeReview = state.AgentTypeReview
 
+// Deprecated: Use state.AgentTypePRShepherd directly.
+const TypePRShepherd = state.AgentTypePRShepherd
+
 // Embedded default prompts
 // Only supervisor and workspace are "hardcoded" - other agent types (worker, merge-queue, review)
 // should come from configurable agent definitions in agent-templates.
@@ -74,6 +77,8 @@ func LoadCustomPrompt(repoPath string, agentType state.AgentType) (string, error
 		filename = "WORKER.md"
 	case state.AgentTypeMergeQueue:
 		filename = "MERGE-QUEUE.md"
+	case state.AgentTypePRShepherd:
+		filename = "PR-SHEPHERD.md"
 	case state.AgentTypeWorkspace:
 		filename = "WORKSPACE.md"
 	case state.AgentTypeReview:
@@ -170,6 +175,54 @@ gh pr list --label multiclaude
 
 Monitor and process all multiclaude-labeled PRs regardless of author or assignee.`
 	}
+}
+
+// GenerateForkWorkflowPrompt generates prompt text explaining fork-based workflow.
+// This is injected into all agent prompts when working in a fork.
+func GenerateForkWorkflowPrompt(upstreamOwner, upstreamRepo, forkOwner string) string {
+	return fmt.Sprintf(`## Fork Workflow (Auto-detected)
+
+You are working in a fork of **%s/%s**.
+
+**Key differences from upstream workflow:**
+
+### Git Remotes
+- **origin**: Your fork (%s/%s) - push branches here
+- **upstream**: Original repo (%s/%s) - PRs target this repo
+
+### Creating PRs
+PRs should target the upstream repository, not your fork:
+`+"```bash"+`
+# Create a PR targeting upstream
+gh pr create --repo %s/%s --head %s:<branch-name>
+
+# View your PRs on upstream
+gh pr list --repo %s/%s --author @me
+`+"```"+`
+
+### Keeping Synced
+Keep your fork updated with upstream:
+`+"```bash"+`
+# Fetch upstream changes
+git fetch upstream main
+
+# Rebase your work
+git rebase upstream/main
+
+# Update your fork's main
+git checkout main && git merge --ff-only upstream/main && git push origin main
+`+"```"+`
+
+### Important Notes
+- **You cannot merge PRs** - upstream maintainers do that
+- Create branches on your fork (origin), target upstream for PRs
+- Keep rebasing onto upstream/main to avoid conflicts
+- The pr-shepherd agent handles getting PRs ready for review
+`, upstreamOwner, upstreamRepo,
+		forkOwner, upstreamRepo,
+		upstreamOwner, upstreamRepo,
+		upstreamOwner, upstreamRepo, forkOwner,
+		upstreamOwner, upstreamRepo)
 }
 
 // GetSlashCommandsPrompt returns a formatted prompt section containing all available
