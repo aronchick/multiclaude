@@ -14,10 +14,10 @@ func TestListAgentTemplates(t *testing.T) {
 
 	// Check that we have the expected templates
 	expected := map[string]bool{
-		"merge-queue.md":  true,
-		"pr-shepherd.md":  true,
-		"worker.md":       true,
-		"reviewer.md":     true,
+		"merge-queue.md": true,
+		"pr-shepherd.md": true,
+		"worker.md":      true,
+		"reviewer.md":    true,
 	}
 
 	if len(templates) != len(expected) {

@@ -6,11 +6,11 @@ import (
 
 func TestParseGitHubURL(t *testing.T) {
 	tests := []struct {
-		name        string
-		url         string
-		wantOwner   string
-		wantRepo    string
-		wantErr     bool
+		name      string
+		url       string
+		wantOwner string
+		wantRepo  string
+		wantErr   bool
 	}{
 		{
 			name:      "HTTPS with .git",
@@ -93,11 +93,11 @@ func TestParseGitHubURL(t *testing.T) {
 func TestForkInfo(t *testing.T) {
 	// Test ForkInfo struct defaults
 	info := &ForkInfo{
-		IsFork:      true,
-		OriginURL:   "https://github.com/me/repo",
-		OriginOwner: "me",
-		OriginRepo:  "repo",
-		UpstreamURL: "https://github.com/upstream/repo",
+		IsFork:        true,
+		OriginURL:     "https://github.com/me/repo",
+		OriginOwner:   "me",
+		OriginRepo:    "repo",
+		UpstreamURL:   "https://github.com/upstream/repo",
 		UpstreamOwner: "upstream",
 		UpstreamRepo:  "repo",
 	}
