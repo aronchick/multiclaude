@@ -2159,7 +2159,19 @@ func TestInitRepoNameParsing(t *testing.T) {
 			cli, _, cleanup := setupTestEnvironment(t)
 			defer cleanup()
 
-			err := cli.Execute([]string{"init", tt.url})
+			// Add timeout to prevent hanging on git clone of non-existent repos
+			done := make(chan error, 1)
+			go func() {
+				done <- cli.Execute([]string{"init", tt.url})
+			}()
+
+			var err error
+			select {
+			case err = <-done:
+				// Test completed
+			case <-time.After(3 * time.Second):
+				t.Fatal("test timed out after 3 seconds (likely hanging on git clone)")
+			}
 
 			if tt.wantError {
 				if err == nil {

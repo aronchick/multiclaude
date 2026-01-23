@@ -1030,15 +1030,23 @@ func (c *CLI) initRepo(args []string) error {
 		return errors.DaemonNotRunning()
 	}
 
-	// Clone repository
+	// Clone repository (skip in test mode)
 	repoPath := c.paths.RepoDir(repoName)
-	fmt.Printf("Cloning to: %s\n", repoPath)
+	var cmd *exec.Cmd
+	if os.Getenv("MULTICLAUDE_TEST_MODE") != "1" {
+		fmt.Printf("Cloning to: %s\n", repoPath)
 
-	cmd := exec.Command("git", "clone", githubURL, repoPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return errors.GitOperationFailed("clone", err)
+		cmd = exec.Command("git", "clone", githubURL, repoPath)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return errors.GitOperationFailed("clone", err)
+		}
+	} else {
+		// In test mode, create a mock repo directory
+		if err := os.MkdirAll(repoPath, 0755); err != nil {
+			return fmt.Errorf("failed to create test repo directory: %w", err)
+		}
 	}
 
 	// Copy agent templates to per-repo agents directory
