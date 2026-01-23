@@ -1432,7 +1432,7 @@ func (d *Daemon) recordTaskHistory(repoName, agentName string, agent state.Agent
 			branch = b
 		} else {
 			// Fallback: construct expected branch name
-			branch = "work/" + agentName
+			branch = "multiclaude/" + agentName
 		}
 	}
 
@@ -1582,7 +1582,7 @@ func (d *Daemon) handleSpawnAgent(req socket.Request) socket.Response {
 		worktreePath = repoPath
 	} else {
 		// Ephemeral agents get their own worktree with a new branch
-		branchName := fmt.Sprintf("work/%s", agentName)
+		branchName := fmt.Sprintf("multiclaude/%s", agentName)
 		if err := wt.CreateNewBranch(worktreePath, branchName, "HEAD"); err != nil {
 			return socket.Response{Success: false, Error: fmt.Sprintf("failed to create worktree: %v", err)}
 		}
