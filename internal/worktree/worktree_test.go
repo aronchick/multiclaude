@@ -2590,3 +2590,177 @@ func TestCleanupOrphanedBackwardsCompatibility(t *testing.T) {
 		t.Errorf("Expected 1 removed, got %d", len(removed))
 	}
 }
+
+func TestDeleteRemoteBranch(t *testing.T) {
+	t.Run("successfully deletes remote branch", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Create a bare remote repository to simulate origin
+		remoteDir, err := os.MkdirTemp("", "remote-*")
+		if err != nil {
+			t.Fatalf("Failed to create remote dir: %v", err)
+		}
+		defer os.RemoveAll(remoteDir)
+
+		// Initialize bare repo
+		cmd := exec.Command("git", "init", "--bare")
+		cmd.Dir = remoteDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to init bare repo: %v", err)
+		}
+
+		// Add remote
+		cmd = exec.Command("git", "remote", "add", "origin", remoteDir)
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add remote: %v", err)
+		}
+
+		// Create and push a branch
+		createBranch(t, repoPath, "work/to-delete")
+		cmd = exec.Command("git", "push", "-u", "origin", "work/to-delete")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push branch: %v", err)
+		}
+
+		// Delete the remote branch
+		err = manager.DeleteRemoteBranch("origin", "work/to-delete")
+		if err != nil {
+			t.Fatalf("DeleteRemoteBranch failed: %v", err)
+		}
+
+		// Verify branch was deleted from remote
+		cmd = exec.Command("git", "ls-remote", "--heads", "origin", "work/to-delete")
+		cmd.Dir = repoPath
+		output, _ := cmd.Output()
+		if len(output) > 0 {
+			t.Error("Remote branch should be deleted but still exists")
+		}
+	})
+
+	t.Run("errors when remote doesn't exist", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		err := manager.DeleteRemoteBranch("nonexistent", "some-branch")
+		if err == nil {
+			t.Error("Expected error when remote doesn't exist")
+		}
+	})
+
+	t.Run("errors when branch doesn't exist on remote", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Create a bare remote repository
+		remoteDir, err := os.MkdirTemp("", "remote-*")
+		if err != nil {
+			t.Fatalf("Failed to create remote dir: %v", err)
+		}
+		defer os.RemoveAll(remoteDir)
+
+		cmd := exec.Command("git", "init", "--bare")
+		cmd.Dir = remoteDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to init bare repo: %v", err)
+		}
+
+		// Add remote
+		cmd = exec.Command("git", "remote", "add", "origin", remoteDir)
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add remote: %v", err)
+		}
+
+		// Try to delete a branch that doesn't exist
+		err = manager.DeleteRemoteBranch("origin", "nonexistent-branch")
+		if err == nil {
+			t.Error("Expected error when branch doesn't exist on remote")
+		}
+	})
+}
+
+func TestCleanupMergedBranchesWithRemoteDeletion(t *testing.T) {
+	t.Run("deletes both local and remote merged branches", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Create a bare remote repository
+		remoteDir, err := os.MkdirTemp("", "remote-*")
+		if err != nil {
+			t.Fatalf("Failed to create remote dir: %v", err)
+		}
+		defer os.RemoveAll(remoteDir)
+
+		cmd := exec.Command("git", "init", "--bare")
+		cmd.Dir = remoteDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to init bare repo: %v", err)
+		}
+
+		// Add remote
+		cmd = exec.Command("git", "remote", "add", "origin", remoteDir)
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add remote: %v", err)
+		}
+
+		// Push main branch first
+		cmd = exec.Command("git", "push", "-u", "origin", "main")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push main: %v", err)
+		}
+
+		// Create a merged branch
+		createBranch(t, repoPath, "work/merged-remote")
+
+		// Push the branch
+		cmd = exec.Command("git", "push", "-u", "origin", "work/merged-remote")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push branch: %v", err)
+		}
+
+		// Fetch to update remote tracking
+		cmd = exec.Command("git", "fetch", "origin")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to fetch: %v", err)
+		}
+
+		// Clean up merged branches with remote deletion
+		deleted, err := manager.CleanupMergedBranches("work/", true)
+		if err != nil {
+			t.Fatalf("CleanupMergedBranches failed: %v", err)
+		}
+
+		if len(deleted) == 0 {
+			t.Error("Expected at least one branch to be deleted")
+		}
+
+		// Verify local branch is deleted
+		exists, _ := manager.BranchExists("work/merged-remote")
+		if exists {
+			t.Error("Local branch should be deleted")
+		}
+
+		// Verify remote branch is deleted
+		cmd = exec.Command("git", "ls-remote", "--heads", "origin", "work/merged-remote")
+		cmd.Dir = repoPath
+		output, _ := cmd.Output()
+		if len(output) > 0 {
+			t.Error("Remote branch should be deleted but still exists")
+		}
+	})
+}
