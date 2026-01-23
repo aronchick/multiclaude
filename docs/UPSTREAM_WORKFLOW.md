@@ -171,6 +171,56 @@ Once submitted, the merge-queue monitors upstream PRs:
 gh pr list --repo <upstream-owner>/<upstream-repo> --author <your-username> --state open
 ```
 
+**IMPORTANT: Track Upstream Status in Fork**
+
+When an upstream PR is created, **immediately comment on the corresponding fork PR** with the upstream reference:
+
+```bash
+# Find the fork PR number (e.g., #46)
+gh pr view <fork-pr-number> --repo <your-fork>
+
+# Add comment linking to upstream
+gh pr comment <fork-pr-number> --repo <your-fork> --body \
+  "🚀 Contributed upstream: <upstream-pr-url>
+
+Status: Pending review"
+```
+
+**When upstream PR status changes, update the fork PR comment:**
+
+- **Merged upstream:**
+  ```bash
+  gh pr comment <fork-pr-number> --repo <your-fork> --body \
+    "✅ Merged upstream: <upstream-pr-url> (merged in commit <sha>)"
+  ```
+
+- **Changes requested:**
+  ```bash
+  gh pr comment <fork-pr-number> --repo <your-fork> --body \
+    "⚠️ Upstream PR needs changes: <upstream-pr-url>
+
+  Feedback: <summary of requested changes>"
+  ```
+
+- **Rejected/closed:**
+  ```bash
+  gh pr comment <fork-pr-number> --repo <your-fork> --body \
+    "❌ Upstream PR closed: <upstream-pr-url>
+
+  Reason: <explanation>
+  This feature remains fork-only."
+  ```
+
+**Alternative tracking (if using Google Docs or external tools):**
+- Reference the upstream PR link in your tracking document
+- Include status updates (pending/merged/rejected)
+- Link back to the fork PR for context
+
+This ensures:
+- Anyone reviewing fork PRs knows what went upstream
+- We can easily audit which features made it upstream
+- Historical context is preserved in the fork's PR history
+
 If upstream PRs get feedback:
 - Supervisor decides: human intervention or spawn worker to address
 - If addressing feedback, worker operates on the contribution branch

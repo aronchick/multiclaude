@@ -535,10 +535,23 @@ For each group of related commits to contribute:
    gh pr create --repo <upstream-owner>/<upstream-repo> --base main --head <your-fork>:upstream-contrib/<feature-name> --title "<focused title>" --body "<description>"
    ```
 
-4. **Track the upstream PR**:
+4. **Track the upstream PR and link back to fork PR**:
    ```bash
    multiclaude agent send-message supervisor "Created upstream PR: <url>. Tracking for review feedback."
    ```
+
+5. **CRITICAL: Comment on the fork PR immediately**:
+   ```bash
+   # Find the fork PR number that contains these commits
+   gh pr list --state merged --search "<commit-hash>" --json number,title --jq '.[0].number'
+
+   # Add comment linking to upstream PR
+   gh pr comment <fork-pr-number> --body "🚀 Contributed upstream: <upstream-pr-url>
+
+   Status: Pending review"
+   ```
+
+   This creates a permanent record in the fork that this work made it upstream.
 
 #### Example Contribution Session
 
@@ -574,9 +587,32 @@ Once you've submitted upstream PRs, monitor them periodically:
 gh pr list --repo <upstream-owner>/<upstream-repo> --author <your-username> --state open
 ```
 
+**When upstream PR status changes, update the fork PR comment:**
+
+- **Merged upstream:**
+  ```bash
+  gh pr comment <fork-pr-number> --body "✅ Merged upstream: <upstream-pr-url> (merged in commit <sha>)"
+  ```
+
+- **Changes requested:**
+  ```bash
+  gh pr comment <fork-pr-number> --body "⚠️ Upstream PR needs changes: <upstream-pr-url>
+
+  Feedback: <summary of requested changes>"
+  ```
+
+- **Rejected/closed:**
+  ```bash
+  gh pr comment <fork-pr-number> --body "❌ Upstream PR closed: <upstream-pr-url>
+
+  Reason: <explanation>
+  This feature remains fork-only."
+  ```
+
 If upstream PRs get feedback:
 - Notify supervisor: `multiclaude agent send-message supervisor "Upstream PR #<number> has review feedback: <summary>"`
 - Supervisor can decide whether to address feedback or let humans handle it
+- **Always update the fork PR comment** to reflect the current status
 
 #### Contribution Frequency
 
