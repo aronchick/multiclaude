@@ -2029,8 +2029,8 @@ func (c *CLI) showHistory(args []string) error {
 	}
 
 	// Get filter options
-	statusFilter := flags["status"]   // Filter by status (merged, open, closed, failed, no-pr)
-	searchQuery := flags["search"]    // Search in task descriptions
+	statusFilter := flags["status"] // Filter by status (merged, open, closed, failed, no-pr)
+	searchQuery := flags["search"]  // Search in task descriptions
 	showFull := flags["full"] == "true"
 
 	// Validate status filter if provided
