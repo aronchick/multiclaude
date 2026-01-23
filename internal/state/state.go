@@ -7,20 +7,32 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-
-	"github.com/dlorenc/multiclaude/internal/events"
 )
 
 // AgentType represents the type of agent
 type AgentType string
 
 const (
-	AgentTypeSupervisor AgentType = "supervisor"
-	AgentTypeWorker     AgentType = "worker"
-	AgentTypeMergeQueue AgentType = "merge-queue"
-	AgentTypeWorkspace  AgentType = "workspace"
-	AgentTypeReview     AgentType = "review"
+	AgentTypeSupervisor        AgentType = "supervisor"
+	AgentTypeWorker            AgentType = "worker"
+	AgentTypeMergeQueue        AgentType = "merge-queue"
+	AgentTypeWorkspace         AgentType = "workspace"
+	AgentTypeReview            AgentType = "review"
+	AgentTypeGenericPersistent AgentType = "generic-persistent"
 )
+
+// IsPersistent returns true if this agent type represents a persistent agent
+// that should be auto-restarted when dead. Persistent agents include supervisor,
+// merge-queue, workspace, and generic-persistent. Transient agents (worker, review)
+// are not auto-restarted.
+func (t AgentType) IsPersistent() bool {
+	switch t {
+	case AgentTypeSupervisor, AgentTypeMergeQueue, AgentTypeWorkspace, AgentTypeGenericPersistent:
+		return true
+	default:
+		return false
+	}
+}
 
 // TrackMode defines which PRs the merge queue should track
 type TrackMode string
@@ -89,9 +101,9 @@ type Agent struct {
 	TmuxWindow      string    `json:"tmux_window"`
 	SessionID       string    `json:"session_id"`
 	PID             int       `json:"pid"`
-	Task            string    `json:"task,omitempty"`             // Only for workers
-	Summary         string    `json:"summary,omitempty"`          // Brief summary of work done (workers only)
-	FailureReason   string    `json:"failure_reason,omitempty"`   // Why the task failed (workers only)
+	Task            string    `json:"task,omitempty"`           // Only for workers
+	Summary         string    `json:"summary,omitempty"`        // Brief summary of work done (workers only)
+	FailureReason   string    `json:"failure_reason,omitempty"` // Why the task failed (workers only)
 	CreatedAt       time.Time `json:"created_at"`
 	LastNudge       time.Time `json:"last_nudge,omitempty"`
 	ReadyForCleanup bool      `json:"ready_for_cleanup,omitempty"` // Only for workers
@@ -110,7 +122,6 @@ type Repository struct {
 type State struct {
 	Repos       map[string]*Repository `json:"repos"`
 	CurrentRepo string                 `json:"current_repo,omitempty"`
-	Hooks       events.HookConfig      `json:"hooks,omitempty"` // Global hook configuration
 	mu          sync.RWMutex
 	path        string
 }
@@ -149,19 +160,12 @@ func Load(path string) (*State, error) {
 	return &s, nil
 }
 
-// Save persists state to disk
-func (s *State) Save() error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal state: %w", err)
-	}
-
+// atomicWrite writes data to a file atomically using a temp file and rename.
+// This prevents corruption if the process crashes during writing.
+func atomicWrite(path string, data []byte) error {
 	// Use a unique temp file to avoid races between concurrent saves.
 	// CreateTemp creates a file with a unique name in the same directory.
-	dir := filepath.Dir(s.path)
+	dir := filepath.Dir(path)
 	tmpFile, err := os.CreateTemp(dir, ".state-*.tmp")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
@@ -183,12 +187,25 @@ func (s *State) Save() error {
 	}
 
 	// Atomic rename
-	if err := os.Rename(tmpPath, s.path); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath) // Clean up temp file on error
 		return fmt.Errorf("failed to rename state file: %w", err)
 	}
 
 	return nil
+}
+
+// Save persists state to disk
+func (s *State) Save() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	return atomicWrite(s.path, data)
 }
 
 // AddRepo adds a new repository to the state
@@ -551,49 +568,5 @@ func (s *State) saveUnlocked() error {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	// Use a unique temp file to avoid races between concurrent saves.
-	// CreateTemp creates a file with a unique name in the same directory.
-	dir := filepath.Dir(s.path)
-	tmpFile, err := os.CreateTemp(dir, ".state-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-
-	// Write data and close the file
-	_, writeErr := tmpFile.Write(data)
-	closeErr := tmpFile.Close()
-
-	// Check for write or close errors
-	if writeErr != nil {
-		os.Remove(tmpPath) // Clean up temp file on error
-		return fmt.Errorf("failed to write state file: %w", writeErr)
-	}
-	if closeErr != nil {
-		os.Remove(tmpPath) // Clean up temp file on error
-		return fmt.Errorf("failed to close temp file: %w", closeErr)
-	}
-
-	// Atomic rename
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		os.Remove(tmpPath) // Clean up temp file on error
-		return fmt.Errorf("failed to rename state file: %w", err)
-	}
-
-	return nil
-}
-
-// GetHookConfig returns the current hook configuration
-func (s *State) GetHookConfig() events.HookConfig {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.Hooks
-}
-
-// UpdateHookConfig updates the hook configuration
-func (s *State) UpdateHookConfig(config events.HookConfig) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.Hooks = config
-	return s.saveUnlocked()
+	return atomicWrite(s.path, data)
 }

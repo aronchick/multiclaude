@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dlorenc/multiclaude/internal/events"
+	"github.com/dlorenc/multiclaude/internal/agents"
 	"github.com/dlorenc/multiclaude/internal/hooks"
 	"github.com/dlorenc/multiclaude/internal/logging"
 	"github.com/dlorenc/multiclaude/internal/messages"
@@ -34,7 +34,6 @@ type Daemon struct {
 	server       *socket.Server
 	pidFile      *PIDFile
 	claudeRunner *claude.Runner
-	eventBus     *events.Bus
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -63,10 +62,6 @@ func New(paths *config.Paths) (*Daemon, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	tmuxClient := tmux.NewClient()
-
-	// Initialize event bus with current hook configuration
-	eventBus := events.NewBus(st.GetHookConfig())
-
 	d := &Daemon{
 		paths:        paths,
 		state:        st,
@@ -74,7 +69,6 @@ func New(paths *config.Paths) (*Daemon, error) {
 		logger:       logger,
 		pidFile:      NewPIDFile(paths.DaemonPID),
 		claudeRunner: claude.NewRunner(claude.WithTerminal(tmuxClient)),
-		eventBus:     eventBus,
 		ctx:          ctx,
 		cancel:       cancel,
 	}
@@ -190,6 +184,32 @@ func getRequiredStringArg(args map[string]interface{}, key, description string) 
 	return val, socket.Response{}, true
 }
 
+// periodicLoop runs a function periodically at the specified interval.
+// If onStartup is provided, it's called immediately before entering the loop.
+// The onTick function is called on each timer tick.
+func (d *Daemon) periodicLoop(name string, interval time.Duration, onStartup, onTick func()) {
+	defer d.wg.Done()
+	d.logger.Info("Starting %s loop", name)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Run startup tasks if provided
+	if onStartup != nil {
+		onStartup()
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			onTick()
+		case <-d.ctx.Done():
+			d.logger.Info("%s loop stopped", name)
+			return
+		}
+	}
+}
+
 // serverLoop handles socket connections
 func (d *Daemon) serverLoop() {
 	defer d.wg.Done()
@@ -213,28 +233,12 @@ func (d *Daemon) serverLoop() {
 
 // healthCheckLoop periodically checks agent health
 func (d *Daemon) healthCheckLoop() {
-	defer d.wg.Done()
-	d.logger.Info("Starting health check loop")
-
-	ticker := time.NewTicker(2 * time.Minute)
-	defer ticker.Stop()
-
-	// Run once immediately on startup
-	d.checkAgentHealth()
-	d.rotateLogsIfNeeded()
-	d.cleanupMergedBranches()
-
-	for {
-		select {
-		case <-ticker.C:
-			d.checkAgentHealth()
-			d.rotateLogsIfNeeded()
-			d.cleanupMergedBranches()
-		case <-d.ctx.Done():
-			d.logger.Info("Health check loop stopped")
-			return
-		}
+	startup := func() {
+		d.checkAgentHealth()
+		d.rotateLogsIfNeeded()
+		d.cleanupMergedBranches()
 	}
+	d.periodicLoop("health check", 2*time.Minute, startup, startup)
 }
 
 // checkAgentHealth checks if agents are still alive
@@ -304,8 +308,8 @@ func (d *Daemon) checkAgentHealth() {
 				if !isProcessAlive(agent.PID) {
 					d.logger.Warn("Agent %s process (PID %d) not running", agentName, agent.PID)
 
-					// For persistent agents (supervisor, merge-queue, workspace), attempt auto-restart
-					if agent.Type == state.AgentTypeSupervisor || agent.Type == state.AgentTypeMergeQueue || agent.Type == state.AgentTypeWorkspace {
+					// For persistent agents (supervisor, merge-queue, workspace, generic-persistent), attempt auto-restart
+					if agent.Type == state.AgentTypeSupervisor || agent.Type == state.AgentTypeMergeQueue || agent.Type == state.AgentTypeWorkspace || agent.Type == state.AgentTypeGenericPersistent {
 						d.logger.Info("Attempting to auto-restart agent %s", agentName)
 						if err := d.restartAgent(repoName, agentName, agent, repo); err != nil {
 							d.logger.Error("Failed to restart agent %s: %v", agentName, err)
@@ -330,21 +334,7 @@ func (d *Daemon) checkAgentHealth() {
 
 // messageRouterLoop watches for new messages and delivers them
 func (d *Daemon) messageRouterLoop() {
-	defer d.wg.Done()
-	d.logger.Info("Starting message router loop")
-
-	ticker := time.NewTicker(2 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			d.routeMessages()
-		case <-d.ctx.Done():
-			d.logger.Info("Message router loop stopped")
-			return
-		}
-	}
+	d.periodicLoop("message router", 2*time.Minute, nil, d.routeMessages)
 }
 
 // routeMessages checks for pending messages and delivers them
@@ -409,21 +399,7 @@ func (d *Daemon) getMessageManager() *messages.Manager {
 
 // wakeLoop periodically wakes agents with status checks
 func (d *Daemon) wakeLoop() {
-	defer d.wg.Done()
-	d.logger.Info("Starting wake loop")
-
-	ticker := time.NewTicker(2 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			d.wakeAgents()
-		case <-d.ctx.Done():
-			d.logger.Info("Wake loop stopped")
-			return
-		}
-	}
+	d.periodicLoop("wake", 2*time.Minute, nil, d.wakeAgents)
 }
 
 // wakeAgents sends periodic nudges to agents
@@ -457,6 +433,8 @@ func (d *Daemon) wakeAgents() {
 				message = "Status check: Update on your progress?"
 			case state.AgentTypeReview:
 				message = "Status check: Update on your review progress?"
+			case state.AgentTypeGenericPersistent:
+				message = "Status check: Update on your progress?"
 			}
 
 			// Send message using atomic method to avoid race conditions (issue #63)
@@ -654,12 +632,6 @@ func (d *Daemon) handleRequest(req socket.Request) socket.Response {
 	case "update_repo_config":
 		return d.handleUpdateRepoConfig(req)
 
-	case "get_hook_config":
-		return d.handleGetHookConfig(req)
-
-	case "update_hook_config":
-		return d.handleUpdateHookConfig(req)
-
 	case "set_current_repo":
 		return d.handleSetCurrentRepo(req)
 
@@ -675,6 +647,9 @@ func (d *Daemon) handleRequest(req socket.Request) socket.Response {
 
 	case "task_history":
 		return d.handleTaskHistory(req)
+
+	case "spawn_agent":
+		return d.handleSpawnAgent(req)
 
 	default:
 		return socket.Response{
@@ -1346,13 +1321,6 @@ func (d *Daemon) cleanupDeadAgents(deadAgents map[string][]string) {
 			// Remove from state
 			if err := d.state.RemoveAgent(repoName, agentName); err != nil {
 				d.logger.Error("Failed to remove agent %s/%s from state: %v", repoName, agentName, err)
-			} else {
-				// Emit agent_stopped event
-				reason := "cleanup"
-				if agent.ReadyForCleanup {
-					reason = "completed"
-				}
-				d.eventBus.Emit(events.NewAgentStoppedEvent(repoName, agentName, reason))
 			}
 
 			// Clean up worktree if it exists (workers and review agents have worktrees)
@@ -1449,6 +1417,156 @@ func (d *Daemon) handleTaskHistory(req socket.Request) socket.Response {
 	}
 
 	return socket.Response{Success: true, Data: result}
+}
+
+// handleSpawnAgent spawns a new agent with an inline prompt (no hardcoded type).
+// This is used by the supervisor to spawn agents based on markdown definitions.
+// Args:
+//   - repo: repository name
+//   - name: agent name (used for tmux window and worktree)
+//   - class: "persistent" or "ephemeral"
+//   - prompt: full prompt text to use as system prompt
+//   - task: optional task description (for ephemeral/worker agents)
+func (d *Daemon) handleSpawnAgent(req socket.Request) socket.Response {
+	repoName, errResp, ok := getRequiredStringArg(req.Args, "repo", "repository name is required")
+	if !ok {
+		return errResp
+	}
+
+	agentName, errResp, ok := getRequiredStringArg(req.Args, "name", "agent name is required")
+	if !ok {
+		return errResp
+	}
+
+	agentClass, errResp, ok := getRequiredStringArg(req.Args, "class", "agent class is required (persistent or ephemeral)")
+	if !ok {
+		return errResp
+	}
+
+	promptText, errResp, ok := getRequiredStringArg(req.Args, "prompt", "prompt text is required")
+	if !ok {
+		return errResp
+	}
+
+	// Validate class
+	if agentClass != "persistent" && agentClass != "ephemeral" {
+		return socket.Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid agent class %q: must be 'persistent' or 'ephemeral'", agentClass),
+		}
+	}
+
+	// Get optional task
+	task, _ := req.Args["task"].(string)
+
+	// Get repository
+	repo, exists := d.state.GetRepo(repoName)
+	if !exists {
+		return socket.Response{Success: false, Error: fmt.Sprintf("repository %q not found", repoName)}
+	}
+
+	// Check if agent already exists
+	if _, exists := d.state.GetAgent(repoName, agentName); exists {
+		return socket.Response{Success: false, Error: fmt.Sprintf("agent %q already exists in repository %q", agentName, repoName)}
+	}
+
+	// Determine agent type based on class
+	var agentType state.AgentType
+	if agentClass == "persistent" {
+		// For persistent agents, use specific type if known or generic persistent
+		if agentName == "merge-queue" {
+			agentType = state.AgentTypeMergeQueue
+		} else {
+			agentType = state.AgentTypeGenericPersistent
+		}
+	} else {
+		// Ephemeral agents are workers or reviewers
+		if strings.Contains(strings.ToLower(agentName), "review") {
+			agentType = state.AgentTypeReview
+		} else {
+			agentType = state.AgentTypeWorker
+		}
+	}
+
+	// Create worktree for the agent
+	repoPath := d.paths.RepoDir(repoName)
+	worktreePath := d.paths.AgentWorktree(repoName, agentName)
+
+	wt := worktree.NewManager(repoPath)
+
+	// Create worktree - persistent agents use repo dir, ephemeral get their own branch
+	if agentClass == "persistent" {
+		// Persistent agents work directly in the repo directory
+		worktreePath = repoPath
+	} else {
+		// Ephemeral agents get their own worktree with a new branch
+		branchName := fmt.Sprintf("work/%s", agentName)
+		if err := wt.CreateNewBranch(worktreePath, branchName, "HEAD"); err != nil {
+			return socket.Response{Success: false, Error: fmt.Sprintf("failed to create worktree: %v", err)}
+		}
+	}
+
+	// Create tmux window with working directory
+	cmd := exec.Command("tmux", "new-window", "-d", "-t", repo.TmuxSession, "-n", agentName, "-c", worktreePath)
+	if err := cmd.Run(); err != nil {
+		// Clean up worktree on failure (only for ephemeral agents that have their own worktree)
+		if agentClass != "persistent" {
+			wt.Remove(worktreePath, true)
+		}
+		return socket.Response{Success: false, Error: fmt.Sprintf("failed to create tmux window: %v", err)}
+	}
+
+	// Write prompt to file
+	promptDir := filepath.Join(d.paths.Root, "prompts")
+	if err := os.MkdirAll(promptDir, 0755); err != nil {
+		return socket.Response{Success: false, Error: fmt.Sprintf("failed to create prompt directory: %v", err)}
+	}
+
+	promptPath := filepath.Join(promptDir, fmt.Sprintf("%s.md", agentName))
+	if err := os.WriteFile(promptPath, []byte(promptText), 0644); err != nil {
+		return socket.Response{Success: false, Error: fmt.Sprintf("failed to write prompt file: %v", err)}
+	}
+
+	// Copy hooks config
+	if err := hooks.CopyConfig(repoPath, worktreePath); err != nil {
+		d.logger.Warn("Failed to copy hooks config: %v", err)
+	}
+
+	// Start Claude in the tmux window
+	cfg := agentStartConfig{
+		agentName:  agentName,
+		agentType:  agentType,
+		promptFile: promptPath,
+		workDir:    worktreePath,
+	}
+
+	if err := d.startAgentWithConfig(repoName, repo, cfg); err != nil {
+		// Clean up on failure
+		d.tmux.KillWindow(d.ctx, repo.TmuxSession, agentName)
+		if agentClass != "persistent" {
+			wt.Remove(worktreePath, true)
+		}
+		return socket.Response{Success: false, Error: fmt.Sprintf("failed to start agent: %v", err)}
+	}
+
+	// Update task if provided
+	if task != "" {
+		agent, _ := d.state.GetAgent(repoName, agentName)
+		agent.Task = task
+		d.state.UpdateAgent(repoName, agentName, agent)
+	}
+
+	d.logger.Info("Spawned agent %s/%s (class=%s, type=%s)", repoName, agentName, agentClass, agentType)
+
+	return socket.Response{
+		Success: true,
+		Data: map[string]interface{}{
+			"name":          agentName,
+			"class":         agentClass,
+			"type":          string(agentType),
+			"worktree_path": worktreePath,
+		},
+	}
 }
 
 // cleanupOrphanedWorktrees removes worktree directories without git tracking
@@ -1580,9 +1698,8 @@ func (d *Daemon) restoreDeadAgents(repoName string, repo *state.Repository) {
 		// Process is dead but window exists - restart persistent agents with --resume
 		d.logger.Info("Agent %s process (PID %d) is dead, attempting restart", agentName, agent.PID)
 
-		// For persistent agents (supervisor, merge-queue, workspace), auto-restart
-		// For transient agents (workers, review), they will be cleaned up by health check
-		if agent.Type == state.AgentTypeSupervisor || agent.Type == state.AgentTypeMergeQueue || agent.Type == state.AgentTypeWorkspace {
+		// For persistent agents, auto-restart. For transient agents, they will be cleaned up by health check
+		if agent.Type.IsPersistent() {
 			if err := d.restartAgent(repoName, agentName, agent, repo); err != nil {
 				d.logger.Error("Failed to restart agent %s: %v", agentName, err)
 			} else {
@@ -1624,26 +1741,14 @@ func (d *Daemon) restoreRepoAgents(repoName string, repo *state.Repository) erro
 		mqConfig = state.DefaultMergeQueueConfig()
 	}
 
-	// Create merge-queue window only if enabled
-	if mqConfig.Enabled {
-		cmd = exec.Command("tmux", "new-window", "-d", "-t", repo.TmuxSession, "-n", "merge-queue", "-c", repoPath)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to create merge-queue window: %w", err)
-		}
-	}
-
 	// Start supervisor agent
-	if err := d.startAgent(repoName, repo, "supervisor", prompts.TypeSupervisor, repoPath); err != nil {
+	if err := d.startAgent(repoName, repo, "supervisor", state.AgentTypeSupervisor, repoPath); err != nil {
 		d.logger.Error("Failed to start supervisor for %s: %v", repoName, err)
 	}
 
-	// Start merge-queue agent only if enabled
-	if mqConfig.Enabled {
-		if err := d.startMergeQueueAgent(repoName, repo, repoPath, mqConfig); err != nil {
-			d.logger.Error("Failed to start merge-queue for %s: %v", repoName, err)
-		}
-	} else {
-		d.logger.Info("Merge queue is disabled for repo %s, skipping merge-queue agent", repoName)
+	// Send agent definitions to supervisor (includes merge-queue config for supervisor to decide)
+	if err := d.sendAgentDefinitionsToSupervisor(repoName, repoPath, mqConfig); err != nil {
+		d.logger.Warn("Failed to send agent definitions to supervisor: %v", err)
 	}
 
 	// Create and restore workspace
@@ -1692,12 +1797,74 @@ func (d *Daemon) restoreRepoAgents(repoName string, repo *state.Repository) erro
 		if err := cmd.Run(); err != nil {
 			d.logger.Error("Failed to create workspace window: %v", err)
 		} else {
-			if err := d.startAgent(repoName, repo, "workspace", prompts.TypeWorkspace, workspacePath); err != nil {
+			if err := d.startAgent(repoName, repo, "workspace", state.AgentTypeWorkspace, workspacePath); err != nil {
 				d.logger.Error("Failed to start workspace for %s: %v", repoName, err)
 			}
 		}
 	}
 
+	return nil
+}
+
+// sendAgentDefinitionsToSupervisor reads agent definitions and sends them to the supervisor.
+// This allows the supervisor to know about available agents and spawn them as needed.
+func (d *Daemon) sendAgentDefinitionsToSupervisor(repoName, repoPath string, mqConfig state.MergeQueueConfig) error {
+	// Create agent reader
+	localAgentsDir := d.paths.RepoAgentsDir(repoName)
+	reader := agents.NewReader(localAgentsDir, repoPath)
+
+	// Read all definitions
+	definitions, err := reader.ReadAllDefinitions()
+	if err != nil {
+		return fmt.Errorf("failed to read agent definitions: %w", err)
+	}
+
+	if len(definitions) == 0 {
+		d.logger.Info("No agent definitions found for repo %s", repoName)
+		return nil
+	}
+
+	// Build message with all definitions - send raw content for Claude to interpret
+	var sb strings.Builder
+	sb.WriteString("Agent definitions available for this repository:\n\n")
+
+	// Include merge-queue configuration
+	sb.WriteString("## Merge Queue Configuration\n")
+	if mqConfig.Enabled {
+		sb.WriteString("- Enabled: yes\n")
+		sb.WriteString(fmt.Sprintf("- Track Mode: %s\n\n", mqConfig.TrackMode))
+	} else {
+		sb.WriteString("- Enabled: no (do NOT spawn merge-queue agent)\n\n")
+	}
+
+	for i, def := range definitions {
+		sb.WriteString(fmt.Sprintf("--- Agent Definition %d: %s (source: %s) ---\n", i+1, def.Name, def.Source))
+
+		// For merge-queue, prepend the tracking mode configuration if enabled
+		if def.Name == "merge-queue" && mqConfig.Enabled {
+			trackModePrompt := prompts.GenerateTrackingModePrompt(string(mqConfig.TrackMode))
+			sb.WriteString(trackModePrompt)
+			sb.WriteString("\n\n")
+		}
+
+		sb.WriteString(def.Content)
+		sb.WriteString("\n--- End of Definition ---\n\n")
+	}
+
+	sb.WriteString("Review these definitions and determine which agents to spawn.\n")
+	sb.WriteString("For each agent, decide:\n")
+	sb.WriteString("- Class: Is it persistent (long-running, auto-restarts) or ephemeral (task-based, cleans up)?\n")
+	sb.WriteString("- Spawn now: Should this agent start immediately on repository init?\n\n")
+	sb.WriteString("To spawn an agent, save the prompt to a file and use:\n")
+	sb.WriteString(fmt.Sprintf("  multiclaude agents spawn --repo %s --name <agent-name> --class <persistent|ephemeral> --prompt-file <file>\n", repoName))
+
+	// Send message to supervisor
+	msgMgr := d.getMessageManager()
+	if _, err := msgMgr.Send(repoName, "daemon", "supervisor", sb.String()); err != nil {
+		return fmt.Errorf("failed to send message to supervisor: %w", err)
+	}
+
+	d.logger.Info("Sent %d agent definition(s) to supervisor for repo %s", len(definitions), repoName)
 	return nil
 }
 
@@ -1720,12 +1887,6 @@ type agentStartConfig struct {
 
 // startAgentWithConfig is the unified agent start function that handles all common logic
 func (d *Daemon) startAgentWithConfig(repoName string, repo *state.Repository, cfg agentStartConfig) error {
-	// Resolve claude binary path
-	binaryPath, err := d.getClaudeBinaryPath()
-	if err != nil {
-		return fmt.Errorf("failed to resolve claude binary: %w", err)
-	}
-
 	// Generate session ID
 	sessionID, err := claude.GenerateSessionID()
 	if err != nil {
@@ -1738,24 +1899,35 @@ func (d *Daemon) startAgentWithConfig(repoName string, repo *state.Repository, c
 		d.logger.Warn("Failed to copy hooks config: %v", err)
 	}
 
-	// Build CLI command
-	claudeCmd := fmt.Sprintf("%s --session-id %s --dangerously-skip-permissions --append-system-prompt-file %s",
-		binaryPath, sessionID, cfg.promptFile)
+	var pid int
 
-	// Send command to tmux window
-	target := fmt.Sprintf("%s:%s", repo.TmuxSession, cfg.agentName)
-	cmd := exec.Command("tmux", "send-keys", "-t", target, claudeCmd, "C-m")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to start Claude in tmux: %w", err)
-	}
+	// Skip actual Claude startup in test mode
+	if os.Getenv("MULTICLAUDE_TEST_MODE") != "1" {
+		// Resolve claude binary path
+		binaryPath, err := d.getClaudeBinaryPath()
+		if err != nil {
+			return fmt.Errorf("failed to resolve claude binary: %w", err)
+		}
 
-	// Wait a moment for Claude to start
-	time.Sleep(500 * time.Millisecond)
+		// Build CLI command
+		claudeCmd := fmt.Sprintf("%s --session-id %s --dangerously-skip-permissions --append-system-prompt-file %s",
+			binaryPath, sessionID, cfg.promptFile)
 
-	// Get PID
-	pid, err := d.tmux.GetPanePID(d.ctx, repo.TmuxSession, cfg.agentName)
-	if err != nil {
-		return fmt.Errorf("failed to get Claude PID: %w", err)
+		// Send command to tmux window
+		target := fmt.Sprintf("%s:%s", repo.TmuxSession, cfg.agentName)
+		cmd := exec.Command("tmux", "send-keys", "-t", target, claudeCmd, "C-m")
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to start Claude in tmux: %w", err)
+		}
+
+		// Wait a moment for Claude to start
+		time.Sleep(500 * time.Millisecond)
+
+		// Get PID
+		pid, err = d.tmux.GetPanePID(d.ctx, repo.TmuxSession, cfg.agentName)
+		if err != nil {
+			return fmt.Errorf("failed to get Claude PID: %w", err)
+		}
 	}
 
 	// Register agent with state
@@ -1777,52 +1949,22 @@ func (d *Daemon) startAgentWithConfig(repoName string, repo *state.Repository, c
 }
 
 // startAgent starts a Claude agent in a tmux window and registers it with state
-func (d *Daemon) startAgent(repoName string, repo *state.Repository, agentName string, agentType prompts.AgentType, workDir string) error {
+func (d *Daemon) startAgent(repoName string, repo *state.Repository, agentName string, agentType state.AgentType, workDir string) error {
 	promptFile, err := d.writePromptFile(repoName, agentType, agentName)
 	if err != nil {
 		return fmt.Errorf("failed to write prompt file: %w", err)
 	}
 
-	// Use upstream's refactored agent start function
-	if err := d.startAgentWithConfig(repoName, repo, agentStartConfig{
+	return d.startAgentWithConfig(repoName, repo, agentStartConfig{
 		agentName:  agentName,
-		agentType:  state.AgentType(agentType),
+		agentType:  agentType,
 		promptFile: promptFile,
 		workDir:    workDir,
-	}); err != nil {
-		return err
-	}
-
-	// Emit agent_started event (fork-specific feature)
-	// Note: task description is not available in this function, would need to be passed as parameter
-	d.eventBus.Emit(events.NewAgentStartedEvent(repoName, agentName, string(agentType), ""))
-
-	return nil
-}
-
-// startMergeQueueAgent starts a merge-queue agent with tracking mode configuration
-func (d *Daemon) startMergeQueueAgent(repoName string, repo *state.Repository, workDir string, mqConfig state.MergeQueueConfig) error {
-	promptFile, err := d.writePromptFileWithPrefix(repoName, prompts.TypeMergeQueue, "merge-queue",
-		prompts.GenerateTrackingModePrompt(string(mqConfig.TrackMode)))
-	if err != nil {
-		return fmt.Errorf("failed to write prompt file: %w", err)
-	}
-
-	if err := d.startAgentWithConfig(repoName, repo, agentStartConfig{
-		agentName:  "merge-queue",
-		agentType:  state.AgentTypeMergeQueue,
-		promptFile: promptFile,
-		workDir:    workDir,
-	}); err != nil {
-		return err
-	}
-
-	d.logger.Info("Merge-queue agent started with track mode: %s", mqConfig.TrackMode)
-	return nil
+	})
 }
 
 // writePromptFileWithPrefix writes a prompt file with an optional prefix prepended to the content
-func (d *Daemon) writePromptFileWithPrefix(repoName string, agentType prompts.AgentType, agentName, prefix string) (string, error) {
+func (d *Daemon) writePromptFileWithPrefix(repoName string, agentType state.AgentType, agentName, prefix string) (string, error) {
 	repoPath := d.paths.RepoDir(repoName)
 
 	// Get the base prompt (without CLI docs since we don't have them in daemon context)
@@ -1900,7 +2042,7 @@ func (d *Daemon) restartAgent(repoName, agentName string, agent state.Agent, rep
 }
 
 // writePromptFile writes the agent prompt to a file and returns the path
-func (d *Daemon) writePromptFile(repoName string, agentType prompts.AgentType, agentName string) (string, error) {
+func (d *Daemon) writePromptFile(repoName string, agentType state.AgentType, agentName string) (string, error) {
 	return d.writePromptFileWithPrefix(repoName, agentType, agentName, "")
 }
 
@@ -2167,61 +2309,4 @@ func (d *Daemon) repairCredentials() (int, error) {
 	}
 
 	return fixed, nil
-}
-
-// handleGetHookConfig returns the current hook configuration
-func (d *Daemon) handleGetHookConfig(req socket.Request) socket.Response {
-	config := d.state.GetHookConfig()
-	return socket.Response{
-		Success: true,
-		Data:    config,
-	}
-}
-
-// handleUpdateHookConfig updates the hook configuration
-func (d *Daemon) handleUpdateHookConfig(req socket.Request) socket.Response {
-	// Parse the hook config from args
-	var config events.HookConfig
-
-	if onEvent, ok := req.Args["on_event"].(string); ok {
-		config.OnEvent = onEvent
-	}
-	if onPRCreated, ok := req.Args["on_pr_created"].(string); ok {
-		config.OnPRCreated = onPRCreated
-	}
-	if onAgentIdle, ok := req.Args["on_agent_idle"].(string); ok {
-		config.OnAgentIdle = onAgentIdle
-	}
-	if onMergeComplete, ok := req.Args["on_merge_complete"].(string); ok {
-		config.OnMergeComplete = onMergeComplete
-	}
-	if onAgentStarted, ok := req.Args["on_agent_started"].(string); ok {
-		config.OnAgentStarted = onAgentStarted
-	}
-	if onAgentStopped, ok := req.Args["on_agent_stopped"].(string); ok {
-		config.OnAgentStopped = onAgentStopped
-	}
-	if onTaskAssigned, ok := req.Args["on_task_assigned"].(string); ok {
-		config.OnTaskAssigned = onTaskAssigned
-	}
-	if onCIFailed, ok := req.Args["on_ci_failed"].(string); ok {
-		config.OnCIFailed = onCIFailed
-	}
-	if onWorkerStuck, ok := req.Args["on_worker_stuck"].(string); ok {
-		config.OnWorkerStuck = onWorkerStuck
-	}
-	if onMessageSent, ok := req.Args["on_message_sent"].(string); ok {
-		config.OnMessageSent = onMessageSent
-	}
-
-	// Update state
-	if err := d.state.UpdateHookConfig(config); err != nil {
-		return socket.Response{Success: false, Error: err.Error()}
-	}
-
-	// Update event bus configuration
-	d.eventBus.UpdateConfig(config)
-
-	d.logger.Info("Updated hook configuration")
-	return socket.Response{Success: true}
 }
