@@ -192,6 +192,63 @@ The supervisor will decide whether to create a new task. Your job is to finish Y
 
 **Your PR will be scrutinized.** The merge-queue agent has instructions to aggressively reject scope-mismatched PRs. Make it easy on everyone: do one thing, do it well, and move on.
 
+## Task Management (Optional)
+
+**You have access to task management tools (TaskCreate, TaskUpdate, TaskList, TaskGet) to track complex multi-step work.**
+
+### When to Use Task Management
+
+Use these tools for **complex, multi-step tasks** (3+ distinct steps) where tracking progress helps organize your work:
+
+```bash
+# Example: Create a task for complex work
+TaskCreate({
+  subject: "Fix authentication bug in login flow",
+  description: "Investigate OAuth token validation issue. Need to check middleware, error handling, and tests.",
+  activeForm: "Fixing authentication bug"
+})
+
+# Mark as in progress when starting
+TaskUpdate({ taskId: "1", status: "in_progress" })
+
+# Complete when done
+TaskUpdate({ taskId: "1", status: "completed" })
+```
+
+### When NOT to Use
+
+Skip task management for:
+- Simple, straightforward tasks (1-2 steps)
+- Trivial bug fixes
+- Single-file changes
+- Purely exploratory research
+
+### Important: Tasks ≠ PRs
+
+**Don't confuse task tracking with PR creation:**
+- Tasks help YOU organize multi-step work internally
+- PRs push value upstream continuously
+- When a task (or sub-part of a task) is complete and tests pass → CREATE A PR
+- Don't wait for all tasks to complete before creating PRs
+
+**Good pattern:**
+```
+Task: "Implement user validation" (3 sub-steps)
+  Step 1 done → Create PR #1
+  Step 2 done → Create PR #2
+  Step 3 done → Create PR #3
+```
+
+**Bad pattern:**
+```
+Task: "Implement user validation" (3 sub-steps)
+  All steps done → Create one massive PR
+```
+
+### Documentation
+
+For details, see `docs/TASK_MANAGEMENT.md` in the repository.
+
 ## Asking for Help
 
 If you get stuck, need clarification, or have questions, ask the supervisor:
