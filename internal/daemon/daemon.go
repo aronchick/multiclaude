@@ -750,18 +750,61 @@ func (d *Daemon) handleAddRepo(req socket.Request) socket.Response {
 		}
 	}
 
+	// Parse fork configuration (optional)
+	var forkConfig state.ForkConfig
+	if isFork, ok := req.Args["is_fork"].(bool); ok {
+		forkConfig.IsFork = isFork
+	}
+	if upstreamURL, ok := req.Args["upstream_url"].(string); ok {
+		forkConfig.UpstreamURL = upstreamURL
+	}
+	if upstreamOwner, ok := req.Args["upstream_owner"].(string); ok {
+		forkConfig.UpstreamOwner = upstreamOwner
+	}
+	if upstreamRepo, ok := req.Args["upstream_repo"].(string); ok {
+		forkConfig.UpstreamRepo = upstreamRepo
+	}
+
+	// Parse PR shepherd configuration (optional, defaults for fork mode)
+	psConfig := state.DefaultPRShepherdConfig()
+	if psEnabled, ok := req.Args["ps_enabled"].(bool); ok {
+		psConfig.Enabled = psEnabled
+	}
+	if psTrackMode, ok := req.Args["ps_track_mode"].(string); ok {
+		switch psTrackMode {
+		case "all":
+			psConfig.TrackMode = state.TrackModeAll
+		case "author":
+			psConfig.TrackMode = state.TrackModeAuthor
+		case "assigned":
+			psConfig.TrackMode = state.TrackModeAssigned
+		}
+	}
+
+	// If in fork mode, disable merge-queue and enable pr-shepherd by default
+	if forkConfig.IsFork {
+		mqConfig.Enabled = false
+		psConfig.Enabled = true
+	}
+
 	repo := &state.Repository{
 		GithubURL:        githubURL,
 		TmuxSession:      tmuxSession,
 		Agents:           make(map[string]state.Agent),
 		MergeQueueConfig: mqConfig,
+		PRShepherdConfig: psConfig,
+		ForkConfig:       forkConfig,
 	}
 
 	if err := d.state.AddRepo(name, repo); err != nil {
 		return socket.Response{Success: false, Error: err.Error()}
 	}
 
-	d.logger.Info("Added repository: %s (merge queue: enabled=%v, track=%s)", name, mqConfig.Enabled, mqConfig.TrackMode)
+	if forkConfig.IsFork {
+		d.logger.Info("Added repository: %s (fork of %s/%s, pr-shepherd: enabled=%v)", name, forkConfig.UpstreamOwner, forkConfig.UpstreamRepo, psConfig.Enabled)
+	} else {
+		d.logger.Info("Added repository: %s (merge queue: enabled=%v, track=%s)", name, mqConfig.Enabled, mqConfig.TrackMode)
+	}
 	return socket.Response{Success: true}
 }
 
@@ -1465,9 +1508,12 @@ func (d *Daemon) handleSpawnAgent(req socket.Request) socket.Response {
 	var agentType state.AgentType
 	if agentClass == "persistent" {
 		// For persistent agents, use specific type if known or generic persistent
-		if agentName == "merge-queue" {
+		switch agentName {
+		case "merge-queue":
 			agentType = state.AgentTypeMergeQueue
-		} else {
+		case "pr-shepherd":
+			agentType = state.AgentTypePRShepherd
+		default:
 			agentType = state.AgentTypeGenericPersistent
 		}
 	} else {
@@ -1800,6 +1846,15 @@ func (d *Daemon) restoreRepoAgents(repoName string, repo *state.Repository) erro
 // sendAgentDefinitionsToSupervisor reads agent definitions and sends them to the supervisor.
 // This allows the supervisor to know about available agents and spawn them as needed.
 func (d *Daemon) sendAgentDefinitionsToSupervisor(repoName, repoPath string, mqConfig state.MergeQueueConfig) error {
+	// Get repo to check fork config
+	repo, exists := d.state.GetRepo(repoName)
+	var forkConfig state.ForkConfig
+	var psConfig state.PRShepherdConfig
+	if exists {
+		forkConfig = repo.ForkConfig
+		psConfig = repo.PRShepherdConfig
+	}
+
 	// Create agent reader
 	localAgentsDir := d.paths.RepoAgentsDir(repoName)
 	reader := agents.NewReader(localAgentsDir, repoPath)
@@ -1819,22 +1874,61 @@ func (d *Daemon) sendAgentDefinitionsToSupervisor(repoName, repoPath string, mqC
 	var sb strings.Builder
 	sb.WriteString("Agent definitions available for this repository:\n\n")
 
-	// Include merge-queue configuration
-	sb.WriteString("## Merge Queue Configuration\n")
-	if mqConfig.Enabled {
-		sb.WriteString("- Enabled: yes\n")
-		sb.WriteString(fmt.Sprintf("- Track Mode: %s\n\n", mqConfig.TrackMode))
+	// Include fork mode information if applicable
+	isForkMode := forkConfig.IsFork || forkConfig.ForceForkMode
+	if isForkMode {
+		sb.WriteString("## Fork Mode (ACTIVE)\n")
+		sb.WriteString(fmt.Sprintf("This repository is a fork of **%s/%s**.\n\n", forkConfig.UpstreamOwner, forkConfig.UpstreamRepo))
+		sb.WriteString("**Key differences in fork mode:**\n")
+		sb.WriteString("- Use `pr-shepherd` instead of `merge-queue`\n")
+		sb.WriteString("- PRs target the upstream repository\n")
+		sb.WriteString("- You cannot merge PRs - only prepare them for review\n\n")
+
+		sb.WriteString("## PR Shepherd Configuration\n")
+		if psConfig.Enabled {
+			sb.WriteString("- Enabled: yes\n")
+			sb.WriteString(fmt.Sprintf("- Track Mode: %s\n\n", psConfig.TrackMode))
+		} else {
+			sb.WriteString("- Enabled: no (do NOT spawn pr-shepherd agent)\n\n")
+		}
 	} else {
-		sb.WriteString("- Enabled: no (do NOT spawn merge-queue agent)\n\n")
+		// Include merge-queue configuration for non-fork mode
+		sb.WriteString("## Merge Queue Configuration\n")
+		if mqConfig.Enabled {
+			sb.WriteString("- Enabled: yes\n")
+			sb.WriteString(fmt.Sprintf("- Track Mode: %s\n\n", mqConfig.TrackMode))
+		} else {
+			sb.WriteString("- Enabled: no (do NOT spawn merge-queue agent)\n\n")
+		}
 	}
 
 	for i, def := range definitions {
+		// Skip merge-queue definition in fork mode
+		if isForkMode && def.Name == "merge-queue" {
+			continue
+		}
+		// Skip pr-shepherd definition in non-fork mode
+		if !isForkMode && def.Name == "pr-shepherd" {
+			continue
+		}
+
 		sb.WriteString(fmt.Sprintf("--- Agent Definition %d: %s (source: %s) ---\n", i+1, def.Name, def.Source))
 
 		// For merge-queue, prepend the tracking mode configuration if enabled
 		if def.Name == "merge-queue" && mqConfig.Enabled {
 			trackModePrompt := prompts.GenerateTrackingModePrompt(string(mqConfig.TrackMode))
 			sb.WriteString(trackModePrompt)
+			sb.WriteString("\n\n")
+		}
+
+		// For pr-shepherd, prepend the tracking mode configuration if enabled
+		if def.Name == "pr-shepherd" && psConfig.Enabled {
+			trackModePrompt := prompts.GenerateTrackingModePrompt(string(psConfig.TrackMode))
+			sb.WriteString(trackModePrompt)
+			sb.WriteString("\n\n")
+			// Also add fork workflow context
+			forkPrompt := prompts.GenerateForkWorkflowPrompt(forkConfig.UpstreamOwner, forkConfig.UpstreamRepo, forkConfig.UpstreamOwner)
+			sb.WriteString(forkPrompt)
 			sb.WriteString("\n\n")
 		}
 

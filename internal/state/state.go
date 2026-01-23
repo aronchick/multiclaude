@@ -16,6 +16,7 @@ const (
 	AgentTypeSupervisor        AgentType = "supervisor"
 	AgentTypeWorker            AgentType = "worker"
 	AgentTypeMergeQueue        AgentType = "merge-queue"
+	AgentTypePRShepherd        AgentType = "pr-shepherd"
 	AgentTypeWorkspace         AgentType = "workspace"
 	AgentTypeReview            AgentType = "review"
 	AgentTypeGenericPersistent AgentType = "generic-persistent"
@@ -23,11 +24,11 @@ const (
 
 // IsPersistent returns true if this agent type represents a persistent agent
 // that should be auto-restarted when dead. Persistent agents include supervisor,
-// merge-queue, workspace, and generic-persistent. Transient agents (worker, review)
-// are not auto-restarted.
+// merge-queue, pr-shepherd, workspace, and generic-persistent. Transient agents
+// (worker, review) are not auto-restarted.
 func (t AgentType) IsPersistent() bool {
 	switch t {
-	case AgentTypeSupervisor, AgentTypeMergeQueue, AgentTypeWorkspace, AgentTypeGenericPersistent:
+	case AgentTypeSupervisor, AgentTypeMergeQueue, AgentTypePRShepherd, AgentTypeWorkspace, AgentTypeGenericPersistent:
 		return true
 	default:
 		return false
@@ -60,6 +61,36 @@ func DefaultMergeQueueConfig() MergeQueueConfig {
 		Enabled:   true,
 		TrackMode: TrackModeAll,
 	}
+}
+
+// PRShepherdConfig holds configuration for the PR shepherd agent (used in fork mode)
+type PRShepherdConfig struct {
+	// Enabled determines whether the PR shepherd agent should run (default: true in fork mode)
+	Enabled bool `json:"enabled"`
+	// TrackMode determines which PRs to track: "all", "author", or "assigned" (default: "author")
+	TrackMode TrackMode `json:"track_mode"`
+}
+
+// DefaultPRShepherdConfig returns the default PR shepherd configuration
+func DefaultPRShepherdConfig() PRShepherdConfig {
+	return PRShepherdConfig{
+		Enabled:   true,
+		TrackMode: TrackModeAuthor, // In fork mode, default to tracking only author's PRs
+	}
+}
+
+// ForkConfig holds fork-related configuration for a repository
+type ForkConfig struct {
+	// IsFork is true if the repository is detected as a fork
+	IsFork bool `json:"is_fork"`
+	// UpstreamURL is the URL of the upstream repository (if fork)
+	UpstreamURL string `json:"upstream_url,omitempty"`
+	// UpstreamOwner is the owner of the upstream repository (if fork)
+	UpstreamOwner string `json:"upstream_owner,omitempty"`
+	// UpstreamRepo is the name of the upstream repository (if fork)
+	UpstreamRepo string `json:"upstream_repo,omitempty"`
+	// ForceForkMode forces fork mode even for non-forks (edge case)
+	ForceForkMode bool `json:"force_fork_mode,omitempty"`
 }
 
 // TaskStatus represents the status of a completed task
@@ -111,11 +142,14 @@ type Agent struct {
 
 // Repository represents a tracked repository's state
 type Repository struct {
-	GithubURL        string             `json:"github_url"`
-	TmuxSession      string             `json:"tmux_session"`
-	Agents           map[string]Agent   `json:"agents"`
-	TaskHistory      []TaskHistoryEntry `json:"task_history,omitempty"`
-	MergeQueueConfig MergeQueueConfig   `json:"merge_queue_config,omitempty"`
+	GithubURL         string             `json:"github_url"`
+	TmuxSession       string             `json:"tmux_session"`
+	Agents            map[string]Agent   `json:"agents"`
+	TaskHistory       []TaskHistoryEntry `json:"task_history,omitempty"`
+	MergeQueueConfig  MergeQueueConfig   `json:"merge_queue_config,omitempty"`
+	PRShepherdConfig  PRShepherdConfig   `json:"pr_shepherd_config,omitempty"`
+	ForkConfig        ForkConfig         `json:"fork_config,omitempty"`
+	TargetBranch      string             `json:"target_branch,omitempty"` // Default branch for PRs (usually "main")
 }
 
 // State represents the entire daemon state
@@ -316,6 +350,9 @@ func (s *State) GetAllRepos() map[string]*Repository {
 			TmuxSession:      repo.TmuxSession,
 			Agents:           make(map[string]Agent, len(repo.Agents)),
 			MergeQueueConfig: repo.MergeQueueConfig,
+			PRShepherdConfig: repo.PRShepherdConfig,
+			ForkConfig:       repo.ForkConfig,
+			TargetBranch:     repo.TargetBranch,
 		}
 		// Copy agents
 		for agentName, agent := range repo.Agents {
@@ -461,6 +498,78 @@ func (s *State) UpdateMergeQueueConfig(repoName string, config MergeQueueConfig)
 
 	repo.MergeQueueConfig = config
 	return s.saveUnlocked()
+}
+
+// GetPRShepherdConfig returns the PR shepherd config for a repository
+func (s *State) GetPRShepherdConfig(repoName string) (PRShepherdConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return PRShepherdConfig{}, fmt.Errorf("repository %q not found", repoName)
+	}
+
+	// Return default config if not set (for backward compatibility)
+	if repo.PRShepherdConfig.TrackMode == "" {
+		return DefaultPRShepherdConfig(), nil
+	}
+	return repo.PRShepherdConfig, nil
+}
+
+// UpdatePRShepherdConfig updates the PR shepherd config for a repository
+func (s *State) UpdatePRShepherdConfig(repoName string, config PRShepherdConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	repo.PRShepherdConfig = config
+	return s.saveUnlocked()
+}
+
+// GetForkConfig returns the fork config for a repository
+func (s *State) GetForkConfig(repoName string) (ForkConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return ForkConfig{}, fmt.Errorf("repository %q not found", repoName)
+	}
+
+	return repo.ForkConfig, nil
+}
+
+// UpdateForkConfig updates the fork config for a repository
+func (s *State) UpdateForkConfig(repoName string, config ForkConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	repo.ForkConfig = config
+	return s.saveUnlocked()
+}
+
+// IsForkMode returns true if the repository should operate in fork mode.
+// This is true if the repository is detected as a fork OR if force_fork_mode is enabled.
+func (s *State) IsForkMode(repoName string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return false
+	}
+
+	return repo.ForkConfig.IsFork || repo.ForkConfig.ForceForkMode
 }
 
 // AddTaskHistory adds a completed task to the repository's history

@@ -17,6 +17,7 @@ import (
 	"github.com/dlorenc/multiclaude/internal/bugreport"
 	"github.com/dlorenc/multiclaude/internal/daemon"
 	"github.com/dlorenc/multiclaude/internal/errors"
+	"github.com/dlorenc/multiclaude/internal/fork"
 	"github.com/dlorenc/multiclaude/internal/format"
 	"github.com/dlorenc/multiclaude/internal/hooks"
 	"github.com/dlorenc/multiclaude/internal/messages"
@@ -1041,6 +1042,41 @@ func (c *CLI) initRepo(args []string) error {
 		return errors.GitOperationFailed("clone", err)
 	}
 
+	// Detect if this is a fork
+	forkInfo, err := fork.DetectFork(repoPath)
+	if err != nil {
+		fmt.Printf("Warning: Failed to detect fork status: %v\n", err)
+		forkInfo = &fork.ForkInfo{IsFork: false}
+	}
+
+	// Store fork config
+	var forkConfig state.ForkConfig
+	if forkInfo.IsFork {
+		fmt.Printf("Detected fork of %s/%s\n", forkInfo.UpstreamOwner, forkInfo.UpstreamRepo)
+		forkConfig = state.ForkConfig{
+			IsFork:        true,
+			UpstreamURL:   forkInfo.UpstreamURL,
+			UpstreamOwner: forkInfo.UpstreamOwner,
+			UpstreamRepo:  forkInfo.UpstreamRepo,
+		}
+
+		// Add upstream remote if not already present
+		if !fork.HasUpstreamRemote(repoPath) {
+			fmt.Printf("Adding upstream remote: %s\n", forkInfo.UpstreamURL)
+			if err := fork.AddUpstreamRemote(repoPath, forkInfo.UpstreamURL); err != nil {
+				fmt.Printf("Warning: Failed to add upstream remote: %v\n", err)
+			}
+		}
+
+		// In fork mode, disable merge-queue and enable pr-shepherd by default
+		mqConfig.Enabled = false
+		mqEnabled = false
+	}
+
+	// PR Shepherd config (used in fork mode)
+	psConfig := state.DefaultPRShepherdConfig()
+	psEnabled := forkInfo.IsFork && psConfig.Enabled
+
 	// Copy agent templates to per-repo agents directory
 	agentsDir := c.paths.RepoAgentsDir(repoName)
 	fmt.Printf("Copying agent templates to: %s\n", agentsDir)
@@ -1062,11 +1098,16 @@ func (c *CLI) initRepo(args []string) error {
 		return errors.TmuxOperationFailed("create session", err)
 	}
 
-	// Create merge-queue window only if enabled
+	// Create merge-queue or pr-shepherd window based on mode
 	if mqEnabled {
 		cmd = exec.Command("tmux", "new-window", "-d", "-t", tmuxSession, "-n", "merge-queue", "-c", repoPath)
 		if err := cmd.Run(); err != nil {
 			return errors.TmuxOperationFailed("create merge-queue window", err)
+		}
+	} else if psEnabled {
+		cmd = exec.Command("tmux", "new-window", "-d", "-t", tmuxSession, "-n", "pr-shepherd", "-c", repoPath)
+		if err := cmd.Run(); err != nil {
+			return errors.TmuxOperationFailed("create pr-shepherd window", err)
 		}
 	}
 
@@ -1076,11 +1117,16 @@ func (c *CLI) initRepo(args []string) error {
 		return fmt.Errorf("failed to generate supervisor session ID: %w", err)
 	}
 
-	var mergeQueueSessionID string
+	var mergeQueueSessionID, prShepherdSessionID string
 	if mqEnabled {
 		mergeQueueSessionID, err = claude.GenerateSessionID()
 		if err != nil {
 			return fmt.Errorf("failed to generate merge-queue session ID: %w", err)
+		}
+	} else if psEnabled {
+		prShepherdSessionID, err = claude.GenerateSessionID()
+		if err != nil {
+			return fmt.Errorf("failed to generate pr-shepherd session ID: %w", err)
 		}
 	}
 
@@ -1090,11 +1136,16 @@ func (c *CLI) initRepo(args []string) error {
 		return fmt.Errorf("failed to write supervisor prompt: %w", err)
 	}
 
-	var mergeQueuePromptFile string
+	var mergeQueuePromptFile, prShepherdPromptFile string
 	if mqEnabled {
 		mergeQueuePromptFile, err = c.writeMergeQueuePromptFile(repoPath, "merge-queue", mqConfig)
 		if err != nil {
 			return fmt.Errorf("failed to write merge-queue prompt: %w", err)
+		}
+	} else if psEnabled {
+		prShepherdPromptFile, err = c.writePRShepherdPromptFile(repoPath, "pr-shepherd", psConfig, forkConfig)
+		if err != nil {
+			return fmt.Errorf("failed to write pr-shepherd prompt: %w", err)
 		}
 	}
 
@@ -1104,7 +1155,7 @@ func (c *CLI) initRepo(args []string) error {
 	}
 
 	// Start Claude in supervisor window (skip in test mode)
-	var supervisorPID, mergeQueuePID int
+	var supervisorPID, mergeQueuePID, prShepherdPID int
 	if os.Getenv("MULTICLAUDE_TEST_MODE") != "1" {
 		// Resolve claude binary
 		claudeBinary, err := c.getClaudeBinary()
@@ -1137,19 +1188,40 @@ func (c *CLI) initRepo(args []string) error {
 			if err := c.setupOutputCapture(tmuxSession, "merge-queue", repoName, "merge-queue", "merge-queue"); err != nil {
 				fmt.Printf("Warning: failed to setup output capture for merge-queue: %v\n", err)
 			}
+		} else if psEnabled {
+			fmt.Println("Starting Claude Code in pr-shepherd window...")
+			pid, err = c.startClaudeInTmux(claudeBinary, tmuxSession, "pr-shepherd", repoPath, prShepherdSessionID, prShepherdPromptFile, repoName, "")
+			if err != nil {
+				return fmt.Errorf("failed to start pr-shepherd Claude: %w", err)
+			}
+			prShepherdPID = pid
+
+			// Set up output capture for pr-shepherd
+			if err := c.setupOutputCapture(tmuxSession, "pr-shepherd", repoName, "pr-shepherd", "pr-shepherd"); err != nil {
+				fmt.Printf("Warning: failed to setup output capture for pr-shepherd: %v\n", err)
+			}
 		}
 	}
 
-	// Add repository to daemon state (with merge queue config)
+	// Add repository to daemon state (with merge queue and fork config)
+	addRepoArgs := map[string]interface{}{
+		"name":          repoName,
+		"github_url":    githubURL,
+		"tmux_session":  tmuxSession,
+		"mq_enabled":    mqConfig.Enabled,
+		"mq_track_mode": string(mqConfig.TrackMode),
+		"ps_enabled":    psConfig.Enabled,
+		"ps_track_mode": string(psConfig.TrackMode),
+		"is_fork":       forkConfig.IsFork,
+	}
+	if forkConfig.IsFork {
+		addRepoArgs["upstream_url"] = forkConfig.UpstreamURL
+		addRepoArgs["upstream_owner"] = forkConfig.UpstreamOwner
+		addRepoArgs["upstream_repo"] = forkConfig.UpstreamRepo
+	}
 	resp, err := client.Send(socket.Request{
 		Command: "add_repo",
-		Args: map[string]interface{}{
-			"name":          repoName,
-			"github_url":    githubURL,
-			"tmux_session":  tmuxSession,
-			"mq_enabled":    mqConfig.Enabled,
-			"mq_track_mode": string(mqConfig.TrackMode),
-		},
+		Args:    addRepoArgs,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to register repository with daemon: %w", err)
@@ -1178,7 +1250,7 @@ func (c *CLI) initRepo(args []string) error {
 		return fmt.Errorf("failed to register supervisor: %s", resp.Error)
 	}
 
-	// Add merge-queue agent only if enabled
+	// Add merge-queue agent only if enabled (non-fork mode)
 	if mqEnabled {
 		resp, err = client.Send(socket.Request{
 			Command: "add_agent",
@@ -1197,6 +1269,28 @@ func (c *CLI) initRepo(args []string) error {
 		}
 		if !resp.Success {
 			return fmt.Errorf("failed to register merge-queue: %s", resp.Error)
+		}
+	}
+
+	// Add pr-shepherd agent only if enabled (fork mode)
+	if psEnabled {
+		resp, err = client.Send(socket.Request{
+			Command: "add_agent",
+			Args: map[string]interface{}{
+				"repo":          repoName,
+				"agent":         "pr-shepherd",
+				"type":          "pr-shepherd",
+				"worktree_path": repoPath,
+				"tmux_window":   "pr-shepherd",
+				"session_id":    prShepherdSessionID,
+				"pid":           prShepherdPID,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to register pr-shepherd: %w", err)
+		}
+		if !resp.Success {
+			return fmt.Errorf("failed to register pr-shepherd: %s", resp.Error)
 		}
 	}
 
@@ -5057,6 +5151,30 @@ func (c *CLI) writeMergeQueuePromptFile(repoPath string, agentName string, mqCon
 
 	// Add tracking mode configuration to the prompt
 	trackingConfig := prompts.GenerateTrackingModePrompt(string(mqConfig.TrackMode))
+	promptText = trackingConfig + "\n\n" + promptText
+
+	return c.savePromptToFile(agentName, promptText)
+}
+
+// writePRShepherdPromptFile writes a pr-shepherd prompt file with fork context.
+// It reads the pr-shepherd prompt from agent definitions (configurable agent system).
+func (c *CLI) writePRShepherdPromptFile(repoPath string, agentName string, psConfig state.PRShepherdConfig, forkConfig state.ForkConfig) (string, error) {
+	repoName := filepath.Base(repoPath)
+
+	promptText, err := c.getAgentDefinition(repoName, repoPath, "pr-shepherd")
+	if err != nil {
+		return "", err
+	}
+
+	// Add CLI documentation and slash commands
+	promptText = c.appendDocsAndSlashCommands(promptText)
+
+	// Add fork workflow context
+	forkContext := prompts.GenerateForkWorkflowPrompt(forkConfig.UpstreamOwner, forkConfig.UpstreamRepo, forkConfig.UpstreamOwner)
+	promptText = forkContext + "\n\n" + promptText
+
+	// Add tracking mode configuration to the prompt
+	trackingConfig := prompts.GenerateTrackingModePrompt(string(psConfig.TrackMode))
 	promptText = trackingConfig + "\n\n" + promptText
 
 	return c.savePromptToFile(agentName, promptText)
