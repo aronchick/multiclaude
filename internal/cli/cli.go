@@ -2031,7 +2031,6 @@ func (c *CLI) showHistory(args []string) error {
 	// Get filter options
 	statusFilter := flags["status"]   // Filter by status (merged, open, closed, failed, no-pr)
 	searchQuery := flags["search"]    // Search in task descriptions
-	showFull := flags["full"] == "true"
 
 	// Validate status filter if provided
 	validStatuses := map[string]bool{
@@ -2087,15 +2086,7 @@ func (c *CLI) showHistory(args []string) error {
 	format.Header("%s:", strings.Join(headerParts, ", "))
 	fmt.Println()
 
-	// First pass: collect entries with details to show after table
-	type entryDetails struct {
-		name          string
-		summary       string
-		failureReason string
-	}
-	var detailsToShow []entryDetails
-
-	table := format.NewColoredTable("NAME", "STATUS", "PR", "COMPLETED", "TASK")
+	table := format.NewColoredTable("NAME", "STATUS", "PR URL", "COMPLETED", "TASK", "RESULT")
 	displayedCount := 0
 	for _, item := range history {
 		// Stop once we've displayed enough
@@ -2148,15 +2139,6 @@ func (c *CLI) showHistory(args []string) error {
 
 		displayedCount++
 
-		// Collect entries with summary or failure for detailed display
-		if summary != "" || failureReason != "" {
-			detailsToShow = append(detailsToShow, entryDetails{
-				name:          name,
-				summary:       summary,
-				failureReason: failureReason,
-			})
-		}
-
 		// Format status with color
 		var statusCell format.ColoredCell
 		switch prStatus {
@@ -2172,10 +2154,13 @@ func (c *CLI) showHistory(args []string) error {
 			statusCell = format.ColorCell("no-pr", format.Dim)
 		}
 
-		// Format PR link
+		// Format PR URL - show full URL if available
 		prCell := format.ColorCell("-", format.Dim)
-		if prLink != "" {
-			// Extract just the PR number for display
+		if prURL != "" {
+			prCell = format.ColorCell(prURL, format.Cyan)
+		} else if prLink != "" && prLink != "-" {
+			// If we got a link from getPRStatusForBranch, show it
+			// (in case we queried GitHub and got a URL)
 			prCell = format.ColorCell(prLink, format.Cyan)
 		}
 
@@ -2187,10 +2172,18 @@ func (c *CLI) showHistory(args []string) error {
 			}
 		}
 
-		// Format task - show full or truncate
+		// Format task - don't truncate by default
 		displayTask := task
-		if !showFull {
-			displayTask = format.Truncate(task, 50)
+
+		// Format result (summary or failure reason)
+		resultText := "-"
+		resultColor := format.Dim
+		if failureReason != "" {
+			resultText = failureReason
+			resultColor = format.Red
+		} else if summary != "" {
+			resultText = summary
+			resultColor = nil
 		}
 
 		table.AddRow(
@@ -2199,6 +2192,7 @@ func (c *CLI) showHistory(args []string) error {
 			prCell,
 			completedCell,
 			format.Cell(displayTask),
+			format.ColorCell(resultText, resultColor),
 		)
 	}
 
@@ -2212,34 +2206,13 @@ func (c *CLI) showHistory(args []string) error {
 
 	table.Print()
 
-	// Print detailed summary/failure section if any entries have them
-	if len(detailsToShow) > 0 {
-		fmt.Println()
-		format.Header("Details:")
-		for _, d := range detailsToShow {
-			format.Bold.Printf("\n%s:\n", d.name)
-			if d.summary != "" {
-				format.Dimmed("  Summary: %s", d.summary)
-			}
-			if d.failureReason != "" {
-				format.Red.Printf("  Failure: %s\n", d.failureReason)
-			}
-		}
-	}
-
 	return nil
 }
 
 // getPRStatusForBranch queries GitHub for the PR status of a branch
 func (c *CLI) getPRStatusForBranch(repoPath, branch, existingPRURL string) (status, prLink string) {
-	// If we already have a PR URL, just return it formatted
+	// If we already have a PR URL, just return it
 	if existingPRURL != "" {
-		// Extract PR number from URL for shorter display
-		parts := strings.Split(existingPRURL, "/")
-		if len(parts) > 0 {
-			prNum := parts[len(parts)-1]
-			return "unknown", "#" + prNum
-		}
 		return "unknown", existingPRURL
 	}
 
@@ -2267,7 +2240,7 @@ func (c *CLI) getPRStatusForBranch(repoPath, branch, existingPRURL string) (stat
 	}
 
 	pr := prs[0]
-	prLink = fmt.Sprintf("#%d", pr.Number)
+	prLink = pr.URL
 
 	switch strings.ToLower(pr.State) {
 	case "merged":
