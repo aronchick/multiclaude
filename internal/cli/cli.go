@@ -372,7 +372,7 @@ func (c *CLI) registerCommands() {
 	c.rootCmd.Subcommands["init"] = &Command{
 		Name:        "init",
 		Description: "Initialize a repository",
-		Usage:       "multiclaude init <github-url> [name] [--no-merge-queue] [--mq-track=all|author|assigned]",
+		Usage:       "multiclaude init <github-url> [name] [--no-merge-queue] [--mq-track=all|author|assigned] [--upstream <url>] [--sync-interval <minutes>]",
 		Run:         c.initRepo,
 	}
 
@@ -492,6 +492,22 @@ func (c *CLI) registerCommands() {
 		Description: "Show task history for a repository",
 		Usage:       "multiclaude history [--repo <repo>] [-n <count>] [--status <status>] [--search <query>]",
 		Run:         c.showHistory,
+	}
+
+	// Sync command
+	c.rootCmd.Subcommands["sync"] = &Command{
+		Name:        "sync",
+		Description: "Sync fork with upstream",
+		Usage:       "multiclaude sync [--repo <repo>]",
+		Run:         c.syncRepo,
+	}
+
+	// CI status command
+	c.rootCmd.Subcommands["ci-status"] = &Command{
+		Name:        "ci-status",
+		Description: "Check dual-layer CI status",
+		Usage:       "multiclaude ci-status [--repo <repo>]",
+		Run:         c.ciStatus,
 	}
 
 	// Agent commands (run from within Claude)
@@ -969,7 +985,7 @@ func (c *CLI) initRepo(args []string) error {
 	flags, posArgs := ParseFlags(args)
 
 	if len(posArgs) < 1 {
-		return errors.InvalidUsage("usage: multiclaude init <github-url> [name] [--no-merge-queue] [--mq-track=all|author|assigned]")
+		return errors.InvalidUsage("usage: multiclaude init <github-url> [name] [--no-merge-queue] [--mq-track=all|author|assigned] [--upstream <url>] [--sync-interval <minutes>]")
 	}
 
 	githubURL := strings.TrimRight(posArgs[0], "/")
@@ -1015,12 +1031,36 @@ func (c *CLI) initRepo(args []string) error {
 		TrackMode: mqTrackMode,
 	}
 
+	// Parse upstream configuration flags
+	var upstreamConfig *state.UpstreamConfig
+	if upstreamURL, hasUpstream := flags["upstream"]; hasUpstream && upstreamURL != "" {
+		syncInterval := 30 // Default 30 minutes
+		if intervalStr, ok := flags["sync-interval"]; ok {
+			if parsed, err := strconv.Atoi(intervalStr); err == nil && parsed > 0 {
+				syncInterval = parsed
+			}
+		}
+
+		upstreamConfig = &state.UpstreamConfig{
+			UpstreamURL:    strings.TrimRight(upstreamURL, "/"),
+			UpstreamRemote: "upstream",
+			ForkRemote:     "origin",
+			SyncEnabled:    true,
+			SyncInterval:   syncInterval,
+		}
+	}
+
 	fmt.Printf("Initializing repository: %s\n", repoName)
 	fmt.Printf("GitHub URL: %s\n", githubURL)
 	if mqEnabled {
 		fmt.Printf("Merge queue: enabled (tracking: %s)\n", mqTrackMode)
 	} else {
 		fmt.Printf("Merge queue: disabled\n")
+	}
+	if upstreamConfig != nil {
+		fmt.Printf("Upstream tracking: enabled\n")
+		fmt.Printf("Upstream URL: %s\n", upstreamConfig.UpstreamURL)
+		fmt.Printf("Sync interval: %d minutes\n", upstreamConfig.SyncInterval)
 	}
 
 	// Check if daemon is running
@@ -1046,6 +1086,25 @@ func (c *CLI) initRepo(args []string) error {
 	fmt.Printf("Copying agent templates to: %s\n", agentsDir)
 	if err := templates.CopyAgentTemplates(agentsDir); err != nil {
 		return fmt.Errorf("failed to copy agent templates: %w", err)
+	}
+
+	// Configure upstream remote if provided
+	if upstreamConfig != nil {
+		fmt.Printf("Configuring upstream remote: %s\n", upstreamConfig.UpstreamURL)
+		cmd = exec.Command("git", "-C", repoPath, "remote", "add", upstreamConfig.UpstreamRemote, upstreamConfig.UpstreamURL)
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("Warning: failed to add upstream remote: %v\n", err)
+			// Don't fail init if upstream remote configuration fails
+		} else {
+			// Fetch from upstream
+			fmt.Println("Fetching from upstream...")
+			cmd = exec.Command("git", "-C", repoPath, "fetch", upstreamConfig.UpstreamRemote)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				fmt.Printf("Warning: failed to fetch from upstream: %v\n", err)
+			}
+		}
 	}
 
 	// Create tmux session
@@ -1140,16 +1199,24 @@ func (c *CLI) initRepo(args []string) error {
 		}
 	}
 
-	// Add repository to daemon state (with merge queue config)
+	// Add repository to daemon state (with merge queue config and optional upstream config)
+	addRepoArgs := map[string]interface{}{
+		"name":          repoName,
+		"github_url":    githubURL,
+		"tmux_session":  tmuxSession,
+		"mq_enabled":    mqConfig.Enabled,
+		"mq_track_mode": string(mqConfig.TrackMode),
+	}
+	if upstreamConfig != nil {
+		addRepoArgs["upstream_url"] = upstreamConfig.UpstreamURL
+		addRepoArgs["upstream_remote"] = upstreamConfig.UpstreamRemote
+		addRepoArgs["fork_remote"] = upstreamConfig.ForkRemote
+		addRepoArgs["sync_enabled"] = upstreamConfig.SyncEnabled
+		addRepoArgs["sync_interval"] = upstreamConfig.SyncInterval
+	}
 	resp, err := client.Send(socket.Request{
 		Command: "add_repo",
-		Args: map[string]interface{}{
-			"name":          repoName,
-			"github_url":    githubURL,
-			"tmux_session":  tmuxSession,
-			"mq_enabled":    mqConfig.Enabled,
-			"mq_track_mode": string(mqConfig.TrackMode),
-		},
+		Args:    addRepoArgs,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to register repository with daemon: %w", err)
@@ -5277,4 +5344,218 @@ func (c *CLI) deleteBranch(repoPath, branch string) error {
 	cmd := exec.Command("git", "branch", "-D", branch)
 	cmd.Dir = repoPath
 	return cmd.Run()
+}
+
+// syncRepo syncs fork with upstream
+func (c *CLI) syncRepo(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	// Determine repository
+	var repoName string
+	if repo, ok := flags["repo"]; ok {
+		repoName = repo
+	} else {
+		// Try to infer from cwd
+		inferredRepo, err := c.inferRepoFromCwd()
+		if err == nil {
+			repoName = inferredRepo
+		} else {
+			// Fall back to current repo in state
+			st, err := state.Load(c.paths.StateFile)
+			if err != nil {
+				return fmt.Errorf("failed to load state: %w", err)
+			}
+			repoName = st.GetCurrentRepo()
+			if repoName == "" {
+				return errors.InvalidUsage("no repository specified. Use --repo flag or run from within a repository directory")
+			}
+		}
+	}
+
+	st, err := state.Load(c.paths.StateFile)
+	if err != nil {
+		return fmt.Errorf("failed to load state: %w", err)
+	}
+
+	repo, exists := st.GetRepo(repoName)
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	if repo.UpstreamConfig == nil || !repo.UpstreamConfig.SyncEnabled {
+		return fmt.Errorf("repository %q does not have upstream tracking enabled", repoName)
+	}
+
+	fmt.Printf("Syncing %s with upstream %s...\n", repoName, repo.UpstreamConfig.UpstreamURL)
+
+	repoPath := c.paths.RepoDir(repoName)
+
+	// Fetch from upstream
+	fmt.Println("Fetching from upstream...")
+	cmd := exec.Command("git", "-C", repoPath, "fetch", repo.UpstreamConfig.UpstreamRemote)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to fetch from upstream: %w", err)
+	}
+
+	// Get current branch
+	currentBranchCmd := exec.Command("git", "-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD")
+	currentBranchOut, err := currentBranchCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get current branch: %w", err)
+	}
+	currentBranch := strings.TrimSpace(string(currentBranchOut))
+
+	// Check if on main branch
+	if currentBranch != "main" && currentBranch != "master" {
+		fmt.Printf("Warning: not on main branch (currently on %s). Switch to main first.\n", currentBranch)
+		return nil
+	}
+
+	// Get upstream commit SHA
+	upstreamSHACmd := exec.Command("git", "-C", repoPath, "rev-parse", fmt.Sprintf("%s/main", repo.UpstreamConfig.UpstreamRemote))
+	upstreamSHAOut, err := upstreamSHACmd.Output()
+	if err != nil {
+		// Try master if main doesn't exist
+		upstreamSHACmd = exec.Command("git", "-C", repoPath, "rev-parse", fmt.Sprintf("%s/master", repo.UpstreamConfig.UpstreamRemote))
+		upstreamSHAOut, err = upstreamSHACmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to get upstream commit SHA: %w", err)
+		}
+	}
+	upstreamSHA := strings.TrimSpace(string(upstreamSHAOut))
+
+	// Merge upstream into current branch
+	fmt.Println("Merging upstream changes...")
+	mergeCmd := exec.Command("git", "-C", repoPath, "merge", "--no-edit", upstreamSHA)
+	mergeCmd.Stdout = os.Stdout
+	mergeCmd.Stderr = os.Stderr
+	if err := mergeCmd.Run(); err != nil {
+		fmt.Println("\nMerge conflicts detected. Please resolve manually and run:")
+		fmt.Println("  git add <files>")
+		fmt.Println("  git commit")
+		return fmt.Errorf("merge failed: %w", err)
+	}
+
+	// Update sync time in state
+	if err := st.UpdateSyncTime(repoName, time.Now(), upstreamSHA); err != nil {
+		fmt.Printf("Warning: failed to update sync time in state: %v\n", err)
+	}
+
+	fmt.Println("\n✓ Successfully synced with upstream")
+	fmt.Printf("  Upstream SHA: %s\n", upstreamSHA[:8])
+
+	return nil
+}
+
+// ciStatus checks dual-layer CI status
+func (c *CLI) ciStatus(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	// Determine repository
+	var repoName string
+	if repo, ok := flags["repo"]; ok {
+		repoName = repo
+	} else {
+		// Try to infer from cwd
+		inferredRepo, err := c.inferRepoFromCwd()
+		if err == nil {
+			repoName = inferredRepo
+		} else {
+			// Fall back to current repo in state
+			st, err := state.Load(c.paths.StateFile)
+			if err != nil {
+				return fmt.Errorf("failed to load state: %w", err)
+			}
+			repoName = st.GetCurrentRepo()
+			if repoName == "" {
+				return errors.InvalidUsage("no repository specified. Use --repo flag or run from within a repository directory")
+			}
+		}
+	}
+
+	st, err := state.Load(c.paths.StateFile)
+	if err != nil {
+		return fmt.Errorf("failed to load state: %w", err)
+	}
+
+	repo, exists := st.GetRepo(repoName)
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	if repo.UpstreamConfig == nil {
+		fmt.Printf("Repository: %s\n", repoName)
+		fmt.Println("Upstream tracking: disabled")
+		fmt.Println("\nTo enable upstream tracking, reinitialize with: multiclaude init --upstream <url>")
+		return nil
+	}
+
+	fmt.Printf("Repository: %s\n", repoName)
+	fmt.Printf("Upstream: %s\n\n", repo.UpstreamConfig.UpstreamURL)
+
+	if repo.DualCIStatus == nil {
+		fmt.Println("Dual-layer CI status: Not yet checked")
+		fmt.Printf("\nThe daemon will check CI status automatically every %d minutes.\n", repo.UpstreamConfig.SyncInterval)
+		return nil
+	}
+
+	// Display fork CI status
+	fmt.Println("Fork CI:")
+	fmt.Printf("  Status: %s\n", formatCIStatus(repo.DualCIStatus.ForkCI.Status))
+	if !repo.DualCIStatus.ForkCI.LastCheck.IsZero() {
+		fmt.Printf("  Last Check: %s\n", repo.DualCIStatus.ForkCI.LastCheck.Format("2006-01-02 15:04:05"))
+	}
+	if repo.DualCIStatus.ForkCI.LastCommit != "" {
+		fmt.Printf("  Last Commit: %s\n", repo.DualCIStatus.ForkCI.LastCommit[:8])
+	}
+	if repo.DualCIStatus.ForkCI.FailingSince != nil {
+		fmt.Printf("  Failing Since: %s\n", repo.DualCIStatus.ForkCI.FailingSince.Format("2006-01-02 15:04:05"))
+	}
+
+	fmt.Println()
+
+	// Display upstream CI status
+	fmt.Println("Upstream CI:")
+	fmt.Printf("  Status: %s\n", formatCIStatus(repo.DualCIStatus.UpstreamCI.Status))
+	if !repo.DualCIStatus.UpstreamCI.LastCheck.IsZero() {
+		fmt.Printf("  Last Check: %s\n", repo.DualCIStatus.UpstreamCI.LastCheck.Format("2006-01-02 15:04:05"))
+	}
+	if repo.DualCIStatus.UpstreamCI.LastCommit != "" {
+		fmt.Printf("  Last Commit: %s\n", repo.DualCIStatus.UpstreamCI.LastCommit[:8])
+	}
+	if repo.DualCIStatus.UpstreamCI.FailingSince != nil {
+		fmt.Printf("  Failing Since: %s\n", repo.DualCIStatus.UpstreamCI.FailingSince.Format("2006-01-02 15:04:05"))
+	}
+
+	fmt.Println()
+
+	// Display divergence
+	if repo.DualCIStatus.DivergenceCount > 0 {
+		fmt.Printf("Divergence: %d commits behind upstream\n", repo.DualCIStatus.DivergenceCount)
+		fmt.Println("Run 'multiclaude sync' to sync with upstream")
+	} else {
+		fmt.Println("Divergence: up to date with upstream")
+	}
+
+	if !repo.DualCIStatus.LastSyncTime.IsZero() {
+		fmt.Printf("Last Sync: %s\n", repo.DualCIStatus.LastSyncTime.Format("2006-01-02 15:04:05"))
+	}
+
+	return nil
+}
+
+// formatCIStatus formats CI status with color/emoji
+func formatCIStatus(status string) string {
+	switch status {
+	case "passing":
+		return "✓ passing"
+	case "failing":
+		return "✗ failing"
+	case "pending":
+		return "⋯ pending"
+	default:
+		return "? unknown"
+	}
 }
