@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dlorenc/multiclaude/internal/agents"
 	"github.com/dlorenc/multiclaude/internal/bugreport"
 	"github.com/dlorenc/multiclaude/internal/daemon"
 	"github.com/dlorenc/multiclaude/internal/errors"
@@ -23,6 +24,7 @@ import (
 	"github.com/dlorenc/multiclaude/internal/prompts"
 	"github.com/dlorenc/multiclaude/internal/socket"
 	"github.com/dlorenc/multiclaude/internal/state"
+	"github.com/dlorenc/multiclaude/internal/templates"
 	"github.com/dlorenc/multiclaude/internal/worktree"
 	"github.com/dlorenc/multiclaude/pkg/claude"
 	"github.com/dlorenc/multiclaude/pkg/config"
@@ -142,6 +144,36 @@ func (c *CLI) loadState() (*state.State, error) {
 		return nil, fmt.Errorf("failed to load state: %w", err)
 	}
 	return st, nil
+}
+
+// sendDaemonRequest sends a request to the daemon and handles common error cases.
+// It returns the response if successful, or an error if communication fails or the daemon returns an error.
+func (c *CLI) sendDaemonRequest(command string, args map[string]interface{}) (*socket.Response, error) {
+	client := socket.NewClient(c.paths.DaemonSock)
+	resp, err := client.Send(socket.Request{
+		Command: command,
+		Args:    args,
+	})
+	if err != nil {
+		return nil, errors.DaemonCommunicationFailed(command, err)
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("%s failed: %s", command, resp.Error)
+	}
+	return resp, nil
+}
+
+// removeDirectoryIfExists removes a directory and prints status messages.
+// It prints a warning if removal fails, or a success message if it succeeds.
+// If the directory doesn't exist, it does nothing.
+func removeDirectoryIfExists(path, description string) {
+	if _, err := os.Stat(path); err == nil {
+		if err := os.RemoveAll(path); err != nil {
+			fmt.Printf("  Warning: failed to remove %s: %v\n", description, err)
+		} else {
+			fmt.Printf("  Removed %s\n", path)
+		}
+	}
 }
 
 // tmuxSanitizer replaces problematic characters with hyphens for tmux session names.
@@ -616,6 +648,36 @@ func (c *CLI) registerCommands() {
 		Usage:       "multiclaude version [--json]",
 		Run:         c.versionCommand,
 	}
+
+	// Agents command - for managing agent definitions
+	agentsCmd := &Command{
+		Name:        "agents",
+		Description: "Manage agent definitions",
+		Subcommands: make(map[string]*Command),
+	}
+
+	agentsCmd.Subcommands["list"] = &Command{
+		Name:        "list",
+		Description: "List available agent definitions for a repository",
+		Usage:       "multiclaude agents list [--repo <repo>]",
+		Run:         c.listAgentDefinitions,
+	}
+
+	agentsCmd.Subcommands["spawn"] = &Command{
+		Name:        "spawn",
+		Description: "Spawn an agent from a prompt file",
+		Usage:       "multiclaude agents spawn --name <name> --class <class> --prompt-file <file> [--repo <repo>] [--task <task>]",
+		Run:         c.spawnAgentFromFile,
+	}
+
+	agentsCmd.Subcommands["reset"] = &Command{
+		Name:        "reset",
+		Description: "Reset agent definitions to defaults (re-copy from templates)",
+		Usage:       "multiclaude agents reset [--repo <repo>]",
+		Run:         c.resetAgentDefinitions,
+	}
+
+	c.rootCmd.Subcommands["agents"] = agentsCmd
 }
 
 // Daemon command implementations
@@ -629,16 +691,9 @@ func (c *CLI) runDaemon(args []string) error {
 }
 
 func (c *CLI) stopDaemon(args []string) error {
-	client := socket.NewClient(c.paths.DaemonSock)
-	resp, err := client.Send(socket.Request{
-		Command: "stop",
-	})
+	_, err := c.sendDaemonRequest("stop", nil)
 	if err != nil {
-		return fmt.Errorf("failed to send stop command: %w", err)
-	}
-
-	if !resp.Success {
-		return fmt.Errorf("daemon stop failed: %s", resp.Error)
+		return err
 	}
 
 	fmt.Println("Daemon stopped successfully")
@@ -825,54 +880,24 @@ func (c *CLI) stopAll(args []string) error {
 	if clean {
 		// Remove worktrees directory
 		fmt.Println("\nRemoving worktrees...")
-		if _, err := os.Stat(c.paths.WorktreesDir); err == nil {
-			if err := os.RemoveAll(c.paths.WorktreesDir); err != nil {
-				fmt.Printf("  Warning: failed to remove worktrees: %v\n", err)
-			} else {
-				fmt.Printf("  Removed %s\n", c.paths.WorktreesDir)
-			}
-		}
+		removeDirectoryIfExists(c.paths.WorktreesDir, "worktrees")
 
 		// Remove messages directory
 		fmt.Println("Removing messages...")
-		if _, err := os.Stat(c.paths.MessagesDir); err == nil {
-			if err := os.RemoveAll(c.paths.MessagesDir); err != nil {
-				fmt.Printf("  Warning: failed to remove messages: %v\n", err)
-			} else {
-				fmt.Printf("  Removed %s\n", c.paths.MessagesDir)
-			}
-		}
+		removeDirectoryIfExists(c.paths.MessagesDir, "messages")
 
 		// Remove output logs
 		fmt.Println("Removing output logs...")
-		if _, err := os.Stat(c.paths.OutputDir); err == nil {
-			if err := os.RemoveAll(c.paths.OutputDir); err != nil {
-				fmt.Printf("  Warning: failed to remove output logs: %v\n", err)
-			} else {
-				fmt.Printf("  Removed %s\n", c.paths.OutputDir)
-			}
-		}
+		removeDirectoryIfExists(c.paths.OutputDir, "output logs")
 
 		// Remove claude config (per-agent settings)
 		fmt.Println("Removing agent configs...")
-		if _, err := os.Stat(c.paths.ClaudeConfigDir); err == nil {
-			if err := os.RemoveAll(c.paths.ClaudeConfigDir); err != nil {
-				fmt.Printf("  Warning: failed to remove agent configs: %v\n", err)
-			} else {
-				fmt.Printf("  Removed %s\n", c.paths.ClaudeConfigDir)
-			}
-		}
+		removeDirectoryIfExists(c.paths.ClaudeConfigDir, "agent configs")
 
 		// Remove prompts directory
 		fmt.Println("Removing prompts...")
 		promptsDir := filepath.Join(c.paths.Root, "prompts")
-		if _, err := os.Stat(promptsDir); err == nil {
-			if err := os.RemoveAll(promptsDir); err != nil {
-				fmt.Printf("  Warning: failed to remove prompts: %v\n", err)
-			} else {
-				fmt.Printf("  Removed %s\n", promptsDir)
-			}
-		}
+		removeDirectoryIfExists(promptsDir, "prompts")
 
 		// Clean up local branches in each repository
 		fmt.Println("\nCleaning up local branches...")
@@ -1016,6 +1041,13 @@ func (c *CLI) initRepo(args []string) error {
 		return errors.GitOperationFailed("clone", err)
 	}
 
+	// Copy agent templates to per-repo agents directory
+	agentsDir := c.paths.RepoAgentsDir(repoName)
+	fmt.Printf("Copying agent templates to: %s\n", agentsDir)
+	if err := templates.CopyAgentTemplates(agentsDir); err != nil {
+		return fmt.Errorf("failed to copy agent templates: %w", err)
+	}
+
 	// Create tmux session
 	tmuxSession := sanitizeTmuxSessionName(repoName)
 	if tmuxSession == "mc-" {
@@ -1053,7 +1085,7 @@ func (c *CLI) initRepo(args []string) error {
 	}
 
 	// Write prompt files
-	supervisorPromptFile, err := c.writePromptFile(repoPath, prompts.TypeSupervisor, "supervisor")
+	supervisorPromptFile, err := c.writePromptFile(repoPath, state.AgentTypeSupervisor, "supervisor")
 	if err != nil {
 		return fmt.Errorf("failed to write supervisor prompt: %w", err)
 	}
@@ -1206,7 +1238,7 @@ func (c *CLI) initRepo(args []string) error {
 	}
 
 	// Write prompt file for default workspace
-	workspacePromptFile, err := c.writePromptFile(repoPath, prompts.TypeWorkspace, "default")
+	workspacePromptFile, err := c.writePromptFile(repoPath, state.AgentTypeWorkspace, "default")
 	if err != nil {
 		return fmt.Errorf("failed to write default workspace prompt: %w", err)
 	}
@@ -1273,19 +1305,11 @@ func (c *CLI) initRepo(args []string) error {
 }
 
 func (c *CLI) listRepos(args []string) error {
-	client := socket.NewClient(c.paths.DaemonSock)
-	resp, err := client.Send(socket.Request{
-		Command: "list_repos",
-		Args: map[string]interface{}{
-			"rich": true,
-		},
+	resp, err := c.sendDaemonRequest("list_repos", map[string]interface{}{
+		"rich": true,
 	})
 	if err != nil {
-		return errors.DaemonCommunicationFailed("listing repositories", err)
-	}
-
-	if !resp.Success {
-		return errors.Wrap(errors.CategoryRuntime, "failed to list repos", fmt.Errorf("%s", resp.Error))
+		return err
 	}
 
 	repos, ok := resp.Data.([]interface{})
@@ -1498,18 +1522,11 @@ func (c *CLI) setCurrentRepo(args []string) error {
 
 	repoName := args[0]
 
-	client := socket.NewClient(c.paths.DaemonSock)
-	resp, err := client.Send(socket.Request{
-		Command: "set_current_repo",
-		Args: map[string]interface{}{
-			"name": repoName,
-		},
+	_, err := c.sendDaemonRequest("set_current_repo", map[string]interface{}{
+		"name": repoName,
 	})
 	if err != nil {
-		return errors.DaemonCommunicationFailed("setting current repo", err)
-	}
-	if !resp.Success {
-		return errors.Wrap(errors.CategoryRuntime, "failed to set current repo", fmt.Errorf("%s", resp.Error))
+		return err
 	}
 
 	fmt.Printf("Current repository set to: %s\n", repoName)
@@ -1517,15 +1534,9 @@ func (c *CLI) setCurrentRepo(args []string) error {
 }
 
 func (c *CLI) getCurrentRepo(args []string) error {
-	client := socket.NewClient(c.paths.DaemonSock)
-	resp, err := client.Send(socket.Request{
-		Command: "get_current_repo",
-	})
+	resp, err := c.sendDaemonRequest("get_current_repo", nil)
 	if err != nil {
-		return errors.DaemonCommunicationFailed("getting current repo", err)
-	}
-	if !resp.Success {
-		return errors.Wrap(errors.CategoryRuntime, "failed to get current repo", fmt.Errorf("%s", resp.Error))
+		return err
 	}
 
 	currentRepo, _ := resp.Data.(string)
@@ -1539,15 +1550,9 @@ func (c *CLI) getCurrentRepo(args []string) error {
 }
 
 func (c *CLI) clearCurrentRepo(args []string) error {
-	client := socket.NewClient(c.paths.DaemonSock)
-	resp, err := client.Send(socket.Request{
-		Command: "clear_current_repo",
-	})
+	_, err := c.sendDaemonRequest("clear_current_repo", nil)
 	if err != nil {
-		return errors.DaemonCommunicationFailed("clearing current repo", err)
-	}
-	if !resp.Success {
-		return errors.Wrap(errors.CategoryRuntime, "failed to clear current repo", fmt.Errorf("%s", resp.Error))
+		return err
 	}
 
 	fmt.Println("Current repository cleared")
@@ -1913,20 +1918,12 @@ func (c *CLI) listWorkers(args []string) error {
 		return errors.NotInRepo()
 	}
 
-	client := socket.NewClient(c.paths.DaemonSock)
-	resp, err := client.Send(socket.Request{
-		Command: "list_agents",
-		Args: map[string]interface{}{
-			"repo": repoName,
-			"rich": true,
-		},
+	resp, err := c.sendDaemonRequest("list_agents", map[string]interface{}{
+		"repo": repoName,
+		"rich": true,
 	})
 	if err != nil {
-		return errors.DaemonCommunicationFailed("listing workers", err)
-	}
-
-	if !resp.Success {
-		return errors.Wrap(errors.CategoryRuntime, "failed to list workers", fmt.Errorf("%s", resp.Error))
+		return err
 	}
 
 	agents, ok := resp.Data.([]interface{})
@@ -2011,6 +2008,179 @@ func (c *CLI) listWorkers(args []string) error {
 	return nil
 }
 
+// listAgentDefinitions lists available agent definitions for a repository
+func (c *CLI) listAgentDefinitions(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	// Determine repository
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
+	}
+
+	// Get paths to agent definition directories
+	localAgentsDir := c.paths.RepoAgentsDir(repoName)
+	repoPath := c.paths.RepoDir(repoName)
+
+	// Read and merge agent definitions
+	reader := agents.NewReader(localAgentsDir, repoPath)
+	defs, err := reader.ReadAllDefinitions()
+	if err != nil {
+		return errors.Wrap(errors.CategoryRuntime, "failed to read agent definitions", err)
+	}
+
+	if len(defs) == 0 {
+		fmt.Println("No agent definitions found.")
+		fmt.Printf("\nAgent definitions are stored in:\n")
+		fmt.Printf("  Local: %s\n", localAgentsDir)
+		fmt.Printf("  Repo:  %s/.multiclaude/agents/\n", repoPath)
+		return nil
+	}
+
+	fmt.Printf("Agent definitions for %s:\n\n", repoName)
+
+	// Create colored table
+	table := format.NewColoredTable("Name", "Source", "Title", "Description")
+
+	for _, def := range defs {
+		source := string(def.Source)
+		title := def.ParseTitle()
+		desc := def.ParseDescription()
+
+		// Truncate description if too long
+		desc = format.Truncate(desc, 50)
+
+		// Color the source based on type
+		sourceCell := format.Cell(source)
+		if def.Source == agents.SourceRepo {
+			sourceCell = format.ColorCell(source, format.Green)
+		}
+
+		table.AddRow(
+			format.Cell(def.Name),
+			sourceCell,
+			format.Cell(title),
+			format.Cell(desc),
+		)
+	}
+
+	table.Print()
+
+	return nil
+}
+
+// spawnAgentFromFile spawns an agent using a prompt file and the daemon's spawn_agent handler.
+// This is the CLI command that connects supervisor orchestration with daemon agent spawning.
+func (c *CLI) spawnAgentFromFile(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	// Get required parameters
+	agentName, ok := flags["name"]
+	if !ok || agentName == "" {
+		return errors.InvalidUsage("--name is required")
+	}
+
+	agentClass, ok := flags["class"]
+	if !ok || agentClass == "" {
+		return errors.InvalidUsage("--class is required (persistent or ephemeral)")
+	}
+	if agentClass != "persistent" && agentClass != "ephemeral" {
+		return errors.InvalidUsage("--class must be 'persistent' or 'ephemeral'")
+	}
+
+	promptFile, ok := flags["prompt-file"]
+	if !ok || promptFile == "" {
+		return errors.InvalidUsage("--prompt-file is required")
+	}
+
+	// Determine repository
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
+	}
+
+	// Read prompt from file
+	promptContent, err := os.ReadFile(promptFile)
+	if err != nil {
+		return errors.Wrap(errors.CategoryRuntime, "failed to read prompt file", err)
+	}
+
+	// Get optional task parameter
+	task := flags["task"]
+
+	// Send spawn_agent request to daemon
+	client := socket.NewClient(c.paths.DaemonSock)
+	reqArgs := map[string]interface{}{
+		"repo":   repoName,
+		"name":   agentName,
+		"class":  agentClass,
+		"prompt": string(promptContent),
+	}
+	if task != "" {
+		reqArgs["task"] = task
+	}
+
+	resp, err := client.Send(socket.Request{
+		Command: "spawn_agent",
+		Args:    reqArgs,
+	})
+	if err != nil {
+		return errors.DaemonCommunicationFailed("spawning agent", err)
+	}
+	if !resp.Success {
+		return errors.Wrap(errors.CategoryRuntime, "failed to spawn agent", fmt.Errorf("%s", resp.Error))
+	}
+
+	fmt.Printf("Agent '%s' spawned successfully (class: %s)\n", agentName, agentClass)
+	return nil
+}
+
+// resetAgentDefinitions deletes the local agent definitions and re-copies from templates.
+func (c *CLI) resetAgentDefinitions(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	// Determine repository
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return errors.NotInRepo()
+	}
+
+	// Get agents directory path
+	agentsDir := c.paths.RepoAgentsDir(repoName)
+
+	// Check if directory exists
+	if _, err := os.Stat(agentsDir); os.IsNotExist(err) {
+		fmt.Printf("No agent definitions found at %s\n", agentsDir)
+		fmt.Println("Creating new definitions from templates...")
+	} else {
+		// Remove existing directory
+		fmt.Printf("Removing existing agent definitions at %s...\n", agentsDir)
+		if err := os.RemoveAll(agentsDir); err != nil {
+			return errors.Wrap(errors.CategoryRuntime, "failed to remove agent definitions", err)
+		}
+	}
+
+	// Copy templates
+	if err := templates.CopyAgentTemplates(agentsDir); err != nil {
+		return errors.Wrap(errors.CategoryRuntime, "failed to copy agent templates", err)
+	}
+
+	// List what was copied
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		return errors.Wrap(errors.CategoryRuntime, "failed to list agent definitions", err)
+	}
+
+	fmt.Printf("Reset complete. Agent definitions in %s:\n", agentsDir)
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".md" {
+			fmt.Printf("  - %s\n", entry.Name())
+		}
+	}
+
+	return nil
+}
+
 func (c *CLI) showHistory(args []string) error {
 	flags, _ := ParseFlags(args)
 
@@ -2029,8 +2199,8 @@ func (c *CLI) showHistory(args []string) error {
 	}
 
 	// Get filter options
-	statusFilter := flags["status"]   // Filter by status (merged, open, closed, failed, no-pr)
-	searchQuery := flags["search"]    // Search in task descriptions
+	statusFilter := flags["status"] // Filter by status (merged, open, closed, failed, no-pr)
+	searchQuery := flags["search"]  // Search in task descriptions
 	showFull := flags["full"] == "true"
 
 	// Validate status filter if provided
@@ -2366,25 +2536,8 @@ func (c *CLI) removeWorker(args []string) error {
 	}
 
 	// Check for unpushed commits
-	hasUnpushed, err := worktree.HasUnpushedCommits(wtPath)
-	if err != nil {
-		// This is ok - might not have a tracking branch
-		fmt.Printf("Note: Could not check for unpushed commits (no tracking branch?)\n")
-	} else if hasUnpushed {
-		fmt.Println("\nWarning: Worker has unpushed commits!")
-		branch, err := worktree.GetCurrentBranch(wtPath)
-		if err == nil {
-			fmt.Printf("Branch '%s' has commits not pushed to remote.\n", branch)
-		}
-		fmt.Println("These commits may be lost if you continue with cleanup.")
-		fmt.Print("Continue with cleanup? [y/N]: ")
-
-		var response string
-		fmt.Scanln(&response)
-		if response != "y" && response != "Y" {
-			fmt.Println("Cleanup cancelled")
-			return nil
-		}
+	if err := checkUnpushedCommits(wtPath, "Worker", "cleanup"); err != nil {
+		return nil
 	}
 
 	// Kill tmux window
@@ -2457,17 +2610,10 @@ func (c *CLI) addWorkspace(args []string) error {
 		return err
 	}
 
-	// Determine repository
-	var repoName string
-	if r, ok := flags["repo"]; ok {
-		repoName = r
-	} else {
-		// Try to infer from current directory
-		if inferred, err := c.inferRepoFromCwd(); err == nil {
-			repoName = inferred
-		} else {
-			return errors.MultipleRepos()
-		}
+	// Determine repository using standard resolution chain
+	repoName, err := c.resolveRepo(flags)
+	if err != nil {
+		return err
 	}
 
 	// Determine branch to start from
@@ -2535,7 +2681,7 @@ func (c *CLI) addWorkspace(args []string) error {
 	}
 
 	// Write prompt file for workspace
-	workspacePromptFile, err := c.writePromptFile(repoPath, prompts.TypeWorkspace, workspaceName)
+	workspacePromptFile, err := c.writePromptFile(repoPath, state.AgentTypeWorkspace, workspaceName)
 	if err != nil {
 		return fmt.Errorf("failed to write workspace prompt: %w", err)
 	}
@@ -2686,25 +2832,8 @@ func (c *CLI) removeWorkspace(args []string) error {
 	}
 
 	// Check for unpushed commits
-	hasUnpushed, err := worktree.HasUnpushedCommits(wtPath)
-	if err != nil {
-		// This is ok - might not have a tracking branch
-		fmt.Printf("Note: Could not check for unpushed commits (no tracking branch?)\n")
-	} else if hasUnpushed {
-		fmt.Println("\nWarning: Workspace has unpushed commits!")
-		branch, err := worktree.GetCurrentBranch(wtPath)
-		if err == nil {
-			fmt.Printf("Branch '%s' has commits not pushed to remote.\n", branch)
-		}
-		fmt.Println("These commits may be lost if you continue with removal.")
-		fmt.Print("Continue with removal? [y/N]: ")
-
-		var response string
-		fmt.Scanln(&response)
-		if response != "y" && response != "Y" {
-			fmt.Println("Removal cancelled")
-			return nil
-		}
+	if err := checkUnpushedCommits(wtPath, "Workspace", "removal"); err != nil {
+		return nil
 	}
 
 	// Kill tmux window
@@ -3360,6 +3489,41 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
+// checkUnpushedCommits checks if a worktree has unpushed commits and prompts the user for confirmation.
+// Returns nil if the user wants to continue, or an error to cancel the operation.
+// The entityType parameter should be "Worker" or "Workspace" for appropriate messaging.
+// The action parameter should be "cleanup" or "removal" for appropriate messaging.
+func checkUnpushedCommits(wtPath, entityType, action string) error {
+	hasUnpushed, err := worktree.HasUnpushedCommits(wtPath)
+	if err != nil {
+		// This is ok - might not have a tracking branch
+		fmt.Printf("Note: Could not check for unpushed commits (no tracking branch?)\n")
+		return nil
+	}
+
+	if !hasUnpushed {
+		return nil
+	}
+
+	fmt.Printf("\nWarning: %s has unpushed commits!\n", entityType)
+	branch, err := worktree.GetCurrentBranch(wtPath)
+	if err == nil {
+		fmt.Printf("Branch '%s' has commits not pushed to remote.\n", branch)
+	}
+	fmt.Printf("These commits may be lost if you continue with %s.\n", action)
+	fmt.Printf("Continue with %s? [y/N]: ", action)
+
+	var response string
+	fmt.Scanln(&response)
+	if response != "y" && response != "Y" {
+		// Capitalize first letter of action for the message
+		actionCapitalized := strings.ToUpper(action[:1]) + action[1:]
+		fmt.Printf("%s cancelled\n", actionCapitalized)
+		return fmt.Errorf("cancelled by user")
+	}
+	return nil
+}
+
 func (c *CLI) completeWorker(args []string) error {
 	// Parse flags for optional summary and failure reason
 	flags, _ := ParseFlags(args)
@@ -3558,7 +3722,7 @@ func (c *CLI) reviewPR(args []string) error {
 	}
 
 	// Write prompt file for reviewer
-	reviewerPromptFile, err := c.writePromptFile(repoPath, prompts.TypeReview, reviewerName)
+	reviewerPromptFile, err := c.writePromptFile(repoPath, state.AgentTypeReview, reviewerName)
 	if err != nil {
 		return fmt.Errorf("failed to write reviewer prompt: %w", err)
 	}
@@ -4146,6 +4310,48 @@ func (c *CLI) cleanupMergedBranches(dryRun bool, verbose bool) error {
 	return nil
 }
 
+// cleanupOrphanedBranchesWithPrefix removes orphaned branches matching the given prefix
+func (c *CLI) cleanupOrphanedBranchesWithPrefix(wt *worktree.Manager, branchPrefix, repoName string, dryRun, verbose bool) (removed int, issues int) {
+	orphanedBranches, err := wt.FindOrphanedBranches(branchPrefix)
+	if err != nil && verbose {
+		fmt.Printf("  Warning: failed to find orphaned %s branches: %v\n", branchPrefix, err)
+		return 0, 0
+	}
+
+	if len(orphanedBranches) == 0 {
+		if verbose {
+			branchType := "work"
+			if branchPrefix == "workspace/" {
+				branchType = "workspace"
+			}
+			fmt.Printf("  No orphaned %s branches\n", branchType)
+		}
+		return 0, 0
+	}
+
+	branchType := "work"
+	if branchPrefix == "workspace/" {
+		branchType = "workspace"
+	}
+	fmt.Printf("\nOrphaned %s branches (%d) for %s:\n", branchType, len(orphanedBranches), repoName)
+
+	for _, branch := range orphanedBranches {
+		if dryRun {
+			fmt.Printf("  Would delete branch: %s\n", branch)
+			issues++
+		} else {
+			if err := wt.DeleteBranch(branch); err != nil {
+				fmt.Printf("  Failed to delete %s: %v\n", branch, err)
+			} else {
+				fmt.Printf("  Deleted branch: %s\n", branch)
+				removed++
+			}
+		}
+	}
+
+	return removed, issues
+}
+
 func (c *CLI) localCleanup(dryRun bool, verbose bool) error {
 	// Clean up orphaned worktrees, tmux sessions, and other resources
 	fmt.Println("\nChecking for orphaned resources...")
@@ -4283,51 +4489,14 @@ func (c *CLI) localCleanup(dryRun bool, verbose bool) error {
 				}
 			}
 
-			// Clean up orphaned work/* branches (branches without corresponding worktrees)
-			orphanedBranches, err := wt.FindOrphanedBranches("work/")
-			if err != nil && verbose {
-				fmt.Printf("  Warning: failed to find orphaned branches: %v\n", err)
-			} else if len(orphanedBranches) > 0 {
-				fmt.Printf("\nOrphaned work branches (%d) for %s:\n", len(orphanedBranches), repoName)
-				for _, branch := range orphanedBranches {
-					if dryRun {
-						fmt.Printf("  Would delete branch: %s\n", branch)
-						totalIssues++
-					} else {
-						if err := wt.DeleteBranch(branch); err != nil {
-							fmt.Printf("  Failed to delete %s: %v\n", branch, err)
-						} else {
-							fmt.Printf("  Deleted branch: %s\n", branch)
-							totalRemoved++
-						}
-					}
-				}
-			} else if verbose {
-				fmt.Println("  No orphaned work branches")
-			}
+			// Clean up orphaned work/* and workspace/* branches
+			removed, issues := c.cleanupOrphanedBranchesWithPrefix(wt, "work/", repoName, dryRun, verbose)
+			totalRemoved += removed
+			totalIssues += issues
 
-			// Also clean up orphaned workspace/* branches
-			orphanedWorkspaces, err := wt.FindOrphanedBranches("workspace/")
-			if err != nil && verbose {
-				fmt.Printf("  Warning: failed to find orphaned workspace branches: %v\n", err)
-			} else if len(orphanedWorkspaces) > 0 {
-				fmt.Printf("\nOrphaned workspace branches (%d) for %s:\n", len(orphanedWorkspaces), repoName)
-				for _, branch := range orphanedWorkspaces {
-					if dryRun {
-						fmt.Printf("  Would delete branch: %s\n", branch)
-						totalIssues++
-					} else {
-						if err := wt.DeleteBranch(branch); err != nil {
-							fmt.Printf("  Failed to delete %s: %v\n", branch, err)
-						} else {
-							fmt.Printf("  Deleted branch: %s\n", branch)
-							totalRemoved++
-						}
-					}
-				}
-			} else if verbose {
-				fmt.Println("  No orphaned workspace branches")
-			}
+			removed, issues = c.cleanupOrphanedBranchesWithPrefix(wt, "workspace/", repoName, dryRun, verbose)
+			totalRemoved += removed
+			totalIssues += issues
 		}
 	}
 
@@ -4796,7 +4965,7 @@ func ParseFlags(args []string) (map[string]string, []string) {
 }
 
 // writePromptFile writes the agent prompt to a temporary file and returns the path
-func (c *CLI) writePromptFile(repoPath string, agentType prompts.AgentType, agentName string) (string, error) {
+func (c *CLI) writePromptFile(repoPath string, agentType state.AgentType, agentName string) (string, error) {
 	// Get the complete prompt (default + custom + CLI docs)
 	promptText, err := prompts.GetPrompt(repoPath, agentType, c.documentation)
 	if err != nil {
@@ -4817,13 +4986,67 @@ func (c *CLI) writePromptFile(repoPath string, agentType prompts.AgentType, agen
 	return promptPath, nil
 }
 
-// writeMergeQueuePromptFile writes a merge-queue prompt file with tracking mode configuration
+// writeMergeQueuePromptFile writes a merge-queue prompt file with tracking mode configuration.
+// It reads the merge-queue prompt from agent definitions (configurable agent system).
 func (c *CLI) writeMergeQueuePromptFile(repoPath string, agentName string, mqConfig state.MergeQueueConfig) (string, error) {
-	// Get the complete prompt (default + custom + CLI docs)
-	promptText, err := prompts.GetPrompt(repoPath, prompts.TypeMergeQueue, c.documentation)
+	// Determine the repo name from the repoPath
+	repoName := filepath.Base(repoPath)
+
+	// Read merge-queue prompt from agent definitions
+	localAgentsDir := c.paths.RepoAgentsDir(repoName)
+	reader := agents.NewReader(localAgentsDir, repoPath)
+	definitions, err := reader.ReadAllDefinitions()
 	if err != nil {
-		return "", fmt.Errorf("failed to get prompt: %w", err)
+		return "", fmt.Errorf("failed to read agent definitions: %w", err)
 	}
+
+	// Find the merge-queue definition
+	var promptText string
+	for _, def := range definitions {
+		if def.Name == "merge-queue" {
+			promptText = def.Content
+			break
+		}
+	}
+
+	// If no merge-queue definition found, try to copy from templates and retry
+	if promptText == "" {
+		// Copy templates to local agents dir if it doesn't exist
+		if _, err := os.Stat(localAgentsDir); os.IsNotExist(err) {
+			if err := templates.CopyAgentTemplates(localAgentsDir); err != nil {
+				return "", fmt.Errorf("failed to copy agent templates: %w", err)
+			}
+			// Re-read definitions
+			definitions, err = reader.ReadAllDefinitions()
+			if err != nil {
+				return "", fmt.Errorf("failed to read agent definitions after template copy: %w", err)
+			}
+			for _, def := range definitions {
+				if def.Name == "merge-queue" {
+					promptText = def.Content
+					break
+				}
+			}
+		}
+	}
+
+	if promptText == "" {
+		return "", fmt.Errorf("no merge-queue agent definition found")
+	}
+
+	// Add CLI documentation
+	if c.documentation != "" {
+		promptText += fmt.Sprintf("\n\n---\n\n%s", c.documentation)
+	}
+
+	// Add slash commands section
+	slashCommands := prompts.GetSlashCommandsPrompt()
+	if slashCommands != "" {
+		promptText += fmt.Sprintf("\n\n---\n\n%s", slashCommands)
+	}
+
+	// Note: Custom prompts from <repo>/.multiclaude/REVIEWER.md are deprecated.
+	// Users should customize via <repo>/.multiclaude/agents/merge-queue.md instead.
 
 	// Add tracking mode configuration to the prompt
 	trackingConfig := prompts.GenerateTrackingModePrompt(string(mqConfig.TrackMode))
@@ -4848,13 +5071,67 @@ type WorkerConfig struct {
 	PushToBranch string // Branch to push to instead of creating a new PR (for iterating on existing PRs)
 }
 
-// writeWorkerPromptFile writes a worker prompt file with optional configuration
+// writeWorkerPromptFile writes a worker prompt file with optional configuration.
+// It reads the worker prompt from agent definitions (configurable agent system).
 func (c *CLI) writeWorkerPromptFile(repoPath string, agentName string, config WorkerConfig) (string, error) {
-	// Get the complete prompt (default + custom + CLI docs)
-	promptText, err := prompts.GetPrompt(repoPath, prompts.TypeWorker, c.documentation)
+	// Determine the repo name from the repoPath
+	repoName := filepath.Base(repoPath)
+
+	// Read worker prompt from agent definitions
+	localAgentsDir := c.paths.RepoAgentsDir(repoName)
+	reader := agents.NewReader(localAgentsDir, repoPath)
+	definitions, err := reader.ReadAllDefinitions()
 	if err != nil {
-		return "", fmt.Errorf("failed to get prompt: %w", err)
+		return "", fmt.Errorf("failed to read agent definitions: %w", err)
 	}
+
+	// Find the worker definition
+	var promptText string
+	for _, def := range definitions {
+		if def.Name == "worker" {
+			promptText = def.Content
+			break
+		}
+	}
+
+	// If no worker definition found, try to copy from templates and retry
+	if promptText == "" {
+		// Copy templates to local agents dir if it doesn't exist
+		if _, err := os.Stat(localAgentsDir); os.IsNotExist(err) {
+			if err := templates.CopyAgentTemplates(localAgentsDir); err != nil {
+				return "", fmt.Errorf("failed to copy agent templates: %w", err)
+			}
+			// Re-read definitions
+			definitions, err = reader.ReadAllDefinitions()
+			if err != nil {
+				return "", fmt.Errorf("failed to read agent definitions after template copy: %w", err)
+			}
+			for _, def := range definitions {
+				if def.Name == "worker" {
+					promptText = def.Content
+					break
+				}
+			}
+		}
+	}
+
+	if promptText == "" {
+		return "", fmt.Errorf("no worker agent definition found")
+	}
+
+	// Add CLI documentation
+	if c.documentation != "" {
+		promptText += fmt.Sprintf("\n\n---\n\n%s", c.documentation)
+	}
+
+	// Add slash commands section
+	slashCommands := prompts.GetSlashCommandsPrompt()
+	if slashCommands != "" {
+		promptText += fmt.Sprintf("\n\n---\n\n%s", slashCommands)
+	}
+
+	// Note: Custom prompts from <repo>/.multiclaude/WORKER.md are deprecated.
+	// Users should customize via <repo>/.multiclaude/agents/worker.md instead.
 
 	// Add push-to configuration if specified
 	if config.PushToBranch != "" {
