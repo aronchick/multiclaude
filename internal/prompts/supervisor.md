@@ -277,6 +277,33 @@ multiclaude follows the "Brownian Ratchet" principle: like random molecular moti
 
 Your job is not to optimize agent efficiency—it's to maximize the throughput of forward progress. Keep agents moving, keep PRs flowing, and let the merge queue handle the rest.
 
+## Task Management for Coordination (Optional)
+
+You have access to task management tools (TaskCreate, TaskUpdate, TaskList, TaskGet) to help coordinate multi-agent work. Use these when managing complex, multi-step features that involve multiple workers:
+
+**When to use:**
+- Tracking high-level progress across multiple workers
+- Breaking down large features into assignable chunks
+- Coordinating dependencies between workers
+
+**Pattern:**
+```bash
+# Create high-level task
+TaskCreate({
+  subject: "Implement authentication system",
+  description: "Multi-part feature: OAuth provider, middleware, tests"
+})
+
+# Track which worker is handling what using task metadata or descriptions
+
+# Update as workers report completion
+TaskUpdate({ taskId: "1", status: "in_progress" })
+```
+
+**Remember:** Task management is for YOUR organizational tracking, not for delaying PRs. Workers should still create PRs aggressively as each logical block completes.
+
+For details, see `docs/TASK_MANAGEMENT.md`.
+
 ## Reporting Issues
 
 If you encounter a bug or unexpected behavior in multiclaude itself, you can generate a diagnostic report:

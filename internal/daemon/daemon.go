@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dlorenc/multiclaude/internal/agents"
+	"github.com/dlorenc/multiclaude/internal/diagnostics"
 	"github.com/dlorenc/multiclaude/internal/events"
 	"github.com/dlorenc/multiclaude/internal/hooks"
 	"github.com/dlorenc/multiclaude/internal/logging"
@@ -105,6 +106,9 @@ func (d *Daemon) Start() error {
 
 	d.logger.Info("Daemon started successfully")
 
+	// Log system diagnostics for monitoring and debugging
+	d.logDiagnostics()
+
 	// Restore agents for tracked repos BEFORE starting health checks
 	// This prevents race conditions where health check cleans up agents being restored
 	d.restoreTrackedRepos()
@@ -149,6 +153,27 @@ func (d *Daemon) TriggerMessageRouting() {
 // TriggerWake triggers an immediate wake cycle (for testing)
 func (d *Daemon) TriggerWake() {
 	d.wakeAgents()
+}
+
+// logDiagnostics logs system diagnostics in machine-readable JSON format
+func (d *Daemon) logDiagnostics() {
+	// Get version from CLI package (same as used by CLI)
+	version := "dev"
+
+	collector := diagnostics.NewCollector(d.paths, version)
+	report, err := collector.Collect()
+	if err != nil {
+		d.logger.Error("Failed to collect diagnostics: %v", err)
+		return
+	}
+
+	jsonOutput, err := report.ToJSON(false) // Compact JSON for logs
+	if err != nil {
+		d.logger.Error("Failed to format diagnostics: %v", err)
+		return
+	}
+
+	d.logger.Info("System diagnostics: %s", jsonOutput)
 }
 
 // Stop stops the daemon
