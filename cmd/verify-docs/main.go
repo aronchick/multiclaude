@@ -7,8 +7,9 @@
 // - File paths in docs exist and are correct
 //
 // Usage:
-//   go run cmd/verify-docs/main.go
-//   go run cmd/verify-docs/main.go --fix  # Auto-update docs (future)
+//
+//	go run cmd/verify-docs/main.go
+//	go run cmd/verify-docs/main.go --fix  # Auto-update docs (future)
 package main
 
 import (
@@ -24,7 +25,7 @@ import (
 )
 
 var (
-	fix    = flag.Bool("fix", false, "Automatically fix documentation (not yet implemented)")
+	fix     = flag.Bool("fix", false, "Automatically fix documentation (not yet implemented)")
 	verbose = flag.Bool("v", false, "Verbose output")
 )
 
