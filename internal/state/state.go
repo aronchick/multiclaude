@@ -142,14 +142,14 @@ type Agent struct {
 
 // Repository represents a tracked repository's state
 type Repository struct {
-	GithubURL         string             `json:"github_url"`
-	TmuxSession       string             `json:"tmux_session"`
-	Agents            map[string]Agent   `json:"agents"`
-	TaskHistory       []TaskHistoryEntry `json:"task_history,omitempty"`
-	MergeQueueConfig  MergeQueueConfig   `json:"merge_queue_config,omitempty"`
-	PRShepherdConfig  PRShepherdConfig   `json:"pr_shepherd_config,omitempty"`
-	ForkConfig        ForkConfig         `json:"fork_config,omitempty"`
-	TargetBranch      string             `json:"target_branch,omitempty"` // Default branch for PRs (usually "main")
+	GithubURL        string             `json:"github_url"`
+	TmuxSession      string             `json:"tmux_session"`
+	Agents           map[string]Agent   `json:"agents"`
+	TaskHistory      []TaskHistoryEntry `json:"task_history,omitempty"`
+	MergeQueueConfig MergeQueueConfig   `json:"merge_queue_config,omitempty"`
+	PRShepherdConfig PRShepherdConfig   `json:"pr_shepherd_config,omitempty"`
+	ForkConfig       ForkConfig         `json:"fork_config,omitempty"`
+	TargetBranch     string             `json:"target_branch,omitempty"` // Default branch for PRs (usually "main")
 }
 
 // State represents the entire daemon state
