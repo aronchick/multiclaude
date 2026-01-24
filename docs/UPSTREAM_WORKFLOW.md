@@ -230,6 +230,9 @@ If upstream PRs get feedback:
 
 **For PRs to be upstream-ready, they must be focused.** This is enforced at multiple levels:
 
+When a change is large enough to require a PRD, use the template at `docs/prds/PRD-TEMPLATE.md`
+so agents can execute from a consistent spec.
+
 ### Workers (Creation Time)
 
 Workers are instructed:

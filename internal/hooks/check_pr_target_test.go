@@ -76,10 +76,11 @@ func TestCheckPRTargetScript(t *testing.T) {
 			wantCode: 0,
 		},
 		{
-			name:       "upstream mentioned anywhere in command blocked",
-			input:      `{"tool_input":{"command":"gh pr create --body \"fix for dlorenc/multiclaude issue\""}}`,
-			wantCode:   2,
-			wantStderr: "dlorenc/multiclaude",
+			name:     "upstream mentioned in body text is allowed",
+			input:    `{"tool_input":{"command":"gh pr create --body \"fix for dlorenc/multiclaude issue\""}}`,
+			wantCode: 0,
+			// Body text references to upstream (like issue numbers) should NOT block
+			// Only explicit --repo targeting upstream should be blocked
 		},
 	}
 
