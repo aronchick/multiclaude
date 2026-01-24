@@ -187,53 +187,6 @@ Monitor and process all multiclaude-labeled PRs regardless of author or assignee
 	}
 }
 
-// GenerateForkWorkflowPrompt generates prompt text explaining fork-based workflow.
-// This is injected into all agent prompts when working in a fork.
-func GenerateForkWorkflowPrompt(upstreamOwner, upstreamRepo, forkOwner string) string {
-	return fmt.Sprintf(`## Fork Workflow (Auto-detected)
-
-You are working in a fork of **%s/%s**.
-
-**Key differences from upstream workflow:**
-
-### Git Remotes
-- **origin**: Your fork (%s/%s) - push branches here
-- **upstream**: Original repo (%s/%s) - PRs target this repo
-
-### Creating PRs
-PRs should target the upstream repository, not your fork:
-`+"```bash"+`
-# Create a PR targeting upstream
-gh pr create --repo %s/%s --head %s:<branch-name>
-
-# View your PRs on upstream
-gh pr list --repo %s/%s --author @me
-`+"```"+`
-
-### Keeping Synced
-Keep your fork updated with upstream:
-`+"```bash"+`
-# Fetch upstream changes
-git fetch upstream main
-
-# Rebase your work
-git rebase upstream/main
-
-# Update your fork's main
-git checkout main && git merge --ff-only upstream/main && git push origin main
-`+"```"+`
-
-### Important Notes
-- **You cannot merge PRs** - upstream maintainers do that
-- Create branches on your fork (origin), target upstream for PRs
-- Keep rebasing onto upstream/main to avoid conflicts
-- The pr-shepherd agent handles getting PRs ready for review
-`, upstreamOwner, upstreamRepo,
-		forkOwner, upstreamRepo,
-		upstreamOwner, upstreamRepo,
-		upstreamOwner, upstreamRepo, forkOwner,
-		upstreamOwner, upstreamRepo)
-}
 
 // GetSlashCommandsPrompt returns a formatted prompt section containing all available
 // slash commands. This can be included in agent prompts to document the available
@@ -264,6 +217,18 @@ type ForkInfo struct {
 	UpstreamRepo   string
 	ForkOwner      string
 	ForkRepo       string
+}
+
+// NewForkInfo creates a ForkInfo from individual parameters.
+// This is useful when constructing ForkInfo from state.ForkConfig or other sources.
+func NewForkInfo(upstreamOwner, upstreamRepo, forkOwner, forkRepo string) *ForkInfo {
+	return &ForkInfo{
+		IsFork:        upstreamOwner != "" && upstreamRepo != "",
+		UpstreamOwner: upstreamOwner,
+		UpstreamRepo:  upstreamRepo,
+		ForkOwner:     forkOwner,
+		ForkRepo:      forkRepo,
+	}
 }
 
 // DetectFork determines if the repository is a fork by checking git remotes
