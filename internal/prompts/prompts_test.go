@@ -43,7 +43,7 @@ func TestGetDefaultPromptContent(t *testing.T) {
 	if !strings.Contains(supervisorPrompt, "You are the supervisor") {
 		t.Error("supervisor prompt should mention 'You are the supervisor'")
 	}
-	if !strings.Contains(supervisorPrompt, "multiclaude message send") {
+	if !strings.Contains(supervisorPrompt, "multiclaude agent send-message") {
 		t.Error("supervisor prompt should mention message commands")
 	}
 

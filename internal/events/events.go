@@ -53,15 +53,15 @@ type HookConfig struct {
 	OnEvent string `json:"on_event,omitempty"`
 
 	// Specific event hooks (optional, more granular)
-	OnPRCreated      string `json:"on_pr_created,omitempty"`
-	OnAgentIdle      string `json:"on_agent_idle,omitempty"`
-	OnMergeComplete  string `json:"on_merge_complete,omitempty"`
-	OnAgentStarted   string `json:"on_agent_started,omitempty"`
-	OnAgentStopped   string `json:"on_agent_stopped,omitempty"`
-	OnTaskAssigned   string `json:"on_task_assigned,omitempty"`
-	OnCIFailed       string `json:"on_ci_failed,omitempty"`
-	OnWorkerStuck    string `json:"on_worker_stuck,omitempty"`
-	OnMessageSent    string `json:"on_message_sent,omitempty"`
+	OnPRCreated     string `json:"on_pr_created,omitempty"`
+	OnAgentIdle     string `json:"on_agent_idle,omitempty"`
+	OnMergeComplete string `json:"on_merge_complete,omitempty"`
+	OnAgentStarted  string `json:"on_agent_started,omitempty"`
+	OnAgentStopped  string `json:"on_agent_stopped,omitempty"`
+	OnTaskAssigned  string `json:"on_task_assigned,omitempty"`
+	OnCIFailed      string `json:"on_ci_failed,omitempty"`
+	OnWorkerStuck   string `json:"on_worker_stuck,omitempty"`
+	OnMessageSent   string `json:"on_message_sent,omitempty"`
 }
 
 // Bus is the event bus that emits events to configured hooks
@@ -123,7 +123,7 @@ func (b *Bus) callHook(hookPath string, eventType EventType, eventJSON []byte) {
 
 	// Execute hook: hook_script event_type event_json
 	cmd := exec.CommandContext(ctx, hookPath, string(eventType), string(eventJSON))
-	
+
 	// Fire and forget - we don't wait for output or check errors
 	// Users are responsible for their own error handling in hooks
 	_ = cmd.Run()
@@ -269,4 +269,3 @@ func NewWorkerStuckEvent(repoName, agentName string, durationMinutes int) Event 
 		},
 	}
 }
-

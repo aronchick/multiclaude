@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/dlorenc/multiclaude/internal/events"
 )
 
 // AgentType represents the type of agent
@@ -16,7 +18,6 @@ const (
 	AgentTypeSupervisor        AgentType = "supervisor"
 	AgentTypeWorker            AgentType = "worker"
 	AgentTypeMergeQueue        AgentType = "merge-queue"
-	AgentTypePRShepherd        AgentType = "pr-shepherd"
 	AgentTypeWorkspace         AgentType = "workspace"
 	AgentTypeReview            AgentType = "review"
 	AgentTypeGenericPersistent AgentType = "generic-persistent"
@@ -24,11 +25,11 @@ const (
 
 // IsPersistent returns true if this agent type represents a persistent agent
 // that should be auto-restarted when dead. Persistent agents include supervisor,
-// merge-queue, pr-shepherd, workspace, and generic-persistent. Transient agents
-// (worker, review) are not auto-restarted.
+// merge-queue, workspace, and generic-persistent. Transient agents (worker, review)
+// are not auto-restarted.
 func (t AgentType) IsPersistent() bool {
 	switch t {
-	case AgentTypeSupervisor, AgentTypeMergeQueue, AgentTypePRShepherd, AgentTypeWorkspace, AgentTypeGenericPersistent:
+	case AgentTypeSupervisor, AgentTypeMergeQueue, AgentTypeWorkspace, AgentTypeGenericPersistent:
 		return true
 	default:
 		return false
@@ -47,21 +48,6 @@ const (
 	TrackModeAssigned TrackMode = "assigned"
 )
 
-// ParseTrackMode parses a string into a TrackMode.
-// Returns an error if the string is not a valid track mode.
-func ParseTrackMode(s string) (TrackMode, error) {
-	switch s {
-	case "all":
-		return TrackModeAll, nil
-	case "author":
-		return TrackModeAuthor, nil
-	case "assigned":
-		return TrackModeAssigned, nil
-	default:
-		return "", fmt.Errorf("invalid track mode: %q (valid modes: all, author, assigned)", s)
-	}
-}
-
 // MergeQueueConfig holds configuration for the merge queue agent
 type MergeQueueConfig struct {
 	// Enabled determines whether the merge queue agent should run (default: true)
@@ -76,36 +62,6 @@ func DefaultMergeQueueConfig() MergeQueueConfig {
 		Enabled:   true,
 		TrackMode: TrackModeAll,
 	}
-}
-
-// PRShepherdConfig holds configuration for the PR shepherd agent (used in fork mode)
-type PRShepherdConfig struct {
-	// Enabled determines whether the PR shepherd agent should run (default: true in fork mode)
-	Enabled bool `json:"enabled"`
-	// TrackMode determines which PRs to track: "all", "author", or "assigned" (default: "author")
-	TrackMode TrackMode `json:"track_mode"`
-}
-
-// DefaultPRShepherdConfig returns the default PR shepherd configuration
-func DefaultPRShepherdConfig() PRShepherdConfig {
-	return PRShepherdConfig{
-		Enabled:   true,
-		TrackMode: TrackModeAuthor, // In fork mode, default to tracking only author's PRs
-	}
-}
-
-// ForkConfig holds fork-related configuration for a repository
-type ForkConfig struct {
-	// IsFork is true if the repository is detected as a fork
-	IsFork bool `json:"is_fork"`
-	// UpstreamURL is the URL of the upstream repository (if fork)
-	UpstreamURL string `json:"upstream_url,omitempty"`
-	// UpstreamOwner is the owner of the upstream repository (if fork)
-	UpstreamOwner string `json:"upstream_owner,omitempty"`
-	// UpstreamRepo is the name of the upstream repository (if fork)
-	UpstreamRepo string `json:"upstream_repo,omitempty"`
-	// ForceForkMode forces fork mode even for non-forks (edge case)
-	ForceForkMode bool `json:"force_fork_mode,omitempty"`
 }
 
 // TaskStatus represents the status of a completed task
@@ -155,6 +111,33 @@ type Agent struct {
 	ReadyForCleanup bool      `json:"ready_for_cleanup,omitempty"` // Only for workers
 }
 
+// UpstreamConfig holds configuration for fork/upstream tracking
+type UpstreamConfig struct {
+	UpstreamURL    string `json:"upstream_url"`    // e.g., "https://github.com/dlorenc/multiclaude"
+	UpstreamRemote string `json:"upstream_remote"` // Usually "upstream"
+	ForkRemote     string `json:"fork_remote"`     // Usually "origin"
+	SyncEnabled    bool   `json:"sync_enabled"`    // Enable fork/upstream sync
+	SyncInterval   int    `json:"sync_interval"`   // Minutes between sync checks (default: 30)
+}
+
+// CILayerStatus represents CI status for one layer (fork or upstream)
+type CILayerStatus struct {
+	Status       string     `json:"status"`                  // "passing", "failing", "pending", "unknown"
+	LastCheck    time.Time  `json:"last_check"`              // When we last checked
+	LastCommit   string     `json:"last_commit"`             // SHA of last checked commit
+	FailingSince *time.Time `json:"failing_since,omitempty"` // When did it start failing
+	CheckURL     string     `json:"check_url,omitempty"`     // GH Actions URL
+}
+
+// DualCIStatus tracks CI status at both fork and upstream layers
+type DualCIStatus struct {
+	ForkCI          CILayerStatus `json:"fork_ci"`
+	UpstreamCI      CILayerStatus `json:"upstream_ci"`
+	LastSyncTime    time.Time     `json:"last_sync_time"`   // Last time we synced with upstream
+	LastSyncSHA     string        `json:"last_sync_sha"`    // Last upstream commit synced
+	DivergenceCount int           `json:"divergence_count"` // Commits fork is behind upstream
+}
+
 // Repository represents a tracked repository's state
 type Repository struct {
 	GithubURL        string             `json:"github_url"`
@@ -162,15 +145,16 @@ type Repository struct {
 	Agents           map[string]Agent   `json:"agents"`
 	TaskHistory      []TaskHistoryEntry `json:"task_history,omitempty"`
 	MergeQueueConfig MergeQueueConfig   `json:"merge_queue_config,omitempty"`
-	PRShepherdConfig PRShepherdConfig   `json:"pr_shepherd_config,omitempty"`
-	ForkConfig       ForkConfig         `json:"fork_config,omitempty"`
-	TargetBranch     string             `json:"target_branch,omitempty"` // Default branch for PRs (usually "main")
+	// Dual-layer CI tracking for fork/upstream workflows
+	UpstreamConfig *UpstreamConfig `json:"upstream_config,omitempty"`
+	DualCIStatus   *DualCIStatus   `json:"dual_ci_status,omitempty"`
 }
 
 // State represents the entire daemon state
 type State struct {
 	Repos       map[string]*Repository `json:"repos"`
 	CurrentRepo string                 `json:"current_repo,omitempty"`
+	Hooks       events.HookConfig      `json:"hooks,omitempty"` // Global hook configuration
 	mu          sync.RWMutex
 	path        string
 }
@@ -365,9 +349,6 @@ func (s *State) GetAllRepos() map[string]*Repository {
 			TmuxSession:      repo.TmuxSession,
 			Agents:           make(map[string]Agent, len(repo.Agents)),
 			MergeQueueConfig: repo.MergeQueueConfig,
-			PRShepherdConfig: repo.PRShepherdConfig,
-			ForkConfig:       repo.ForkConfig,
-			TargetBranch:     repo.TargetBranch,
 		}
 		// Copy agents
 		for agentName, agent := range repo.Agents {
@@ -515,78 +496,6 @@ func (s *State) UpdateMergeQueueConfig(repoName string, config MergeQueueConfig)
 	return s.saveUnlocked()
 }
 
-// GetPRShepherdConfig returns the PR shepherd config for a repository
-func (s *State) GetPRShepherdConfig(repoName string) (PRShepherdConfig, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	repo, exists := s.Repos[repoName]
-	if !exists {
-		return PRShepherdConfig{}, fmt.Errorf("repository %q not found", repoName)
-	}
-
-	// Return default config if not set (for backward compatibility)
-	if repo.PRShepherdConfig.TrackMode == "" {
-		return DefaultPRShepherdConfig(), nil
-	}
-	return repo.PRShepherdConfig, nil
-}
-
-// UpdatePRShepherdConfig updates the PR shepherd config for a repository
-func (s *State) UpdatePRShepherdConfig(repoName string, config PRShepherdConfig) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	repo, exists := s.Repos[repoName]
-	if !exists {
-		return fmt.Errorf("repository %q not found", repoName)
-	}
-
-	repo.PRShepherdConfig = config
-	return s.saveUnlocked()
-}
-
-// GetForkConfig returns the fork config for a repository
-func (s *State) GetForkConfig(repoName string) (ForkConfig, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	repo, exists := s.Repos[repoName]
-	if !exists {
-		return ForkConfig{}, fmt.Errorf("repository %q not found", repoName)
-	}
-
-	return repo.ForkConfig, nil
-}
-
-// UpdateForkConfig updates the fork config for a repository
-func (s *State) UpdateForkConfig(repoName string, config ForkConfig) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	repo, exists := s.Repos[repoName]
-	if !exists {
-		return fmt.Errorf("repository %q not found", repoName)
-	}
-
-	repo.ForkConfig = config
-	return s.saveUnlocked()
-}
-
-// IsForkMode returns true if the repository should operate in fork mode.
-// This is true if the repository is detected as a fork OR if force_fork_mode is enabled.
-func (s *State) IsForkMode(repoName string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	repo, exists := s.Repos[repoName]
-	if !exists {
-		return false
-	}
-
-	return repo.ForkConfig.IsFork || repo.ForkConfig.ForceForkMode
-}
-
 // AddTaskHistory adds a completed task to the repository's history
 func (s *State) AddTaskHistory(repoName string, entry TaskHistoryEntry) error {
 	s.mu.Lock()
@@ -693,4 +602,98 @@ func (s *State) saveUnlocked() error {
 	}
 
 	return atomicWrite(s.path, data)
+}
+
+// SetUpstreamConfig sets the upstream configuration for a repository
+func (s *State) SetUpstreamConfig(repoName string, config *UpstreamConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	repo.UpstreamConfig = config
+	return s.saveUnlocked()
+}
+
+// GetUpstreamConfig returns the upstream configuration for a repository
+func (s *State) GetUpstreamConfig(repoName string) (*UpstreamConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return nil, fmt.Errorf("repository %q not found", repoName)
+	}
+
+	return repo.UpstreamConfig, nil
+}
+
+// UpdateDualCIStatus updates the dual CI status for a repository
+func (s *State) UpdateDualCIStatus(repoName string, forkCI, upstreamCI CILayerStatus, divergence int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	if repo.DualCIStatus == nil {
+		repo.DualCIStatus = &DualCIStatus{}
+	}
+
+	repo.DualCIStatus.ForkCI = forkCI
+	repo.DualCIStatus.UpstreamCI = upstreamCI
+	repo.DualCIStatus.DivergenceCount = divergence
+	return s.saveUnlocked()
+}
+
+// UpdateSyncTime updates the last sync time and SHA for a repository
+func (s *State) UpdateSyncTime(repoName string, syncTime time.Time, syncSHA string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return fmt.Errorf("repository %q not found", repoName)
+	}
+
+	if repo.DualCIStatus == nil {
+		repo.DualCIStatus = &DualCIStatus{}
+	}
+
+	repo.DualCIStatus.LastSyncTime = syncTime
+	repo.DualCIStatus.LastSyncSHA = syncSHA
+	return s.saveUnlocked()
+}
+
+// GetDualCIStatus returns the dual CI status for a repository
+func (s *State) GetDualCIStatus(repoName string) (*DualCIStatus, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	repo, exists := s.Repos[repoName]
+	if !exists {
+		return nil, fmt.Errorf("repository %q not found", repoName)
+	}
+
+	return repo.DualCIStatus, nil
+}
+
+// GetHookConfig returns the current hook configuration
+func (s *State) GetHookConfig() events.HookConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Hooks
+}
+
+// UpdateHookConfig updates the hook configuration
+func (s *State) UpdateHookConfig(config events.HookConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Hooks = config
+	return s.saveUnlocked()
 }

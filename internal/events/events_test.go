@@ -187,4 +187,3 @@ echo "$2" > ` + prOutputFile + `
 		t.Error("PR hook did not create output file")
 	}
 }
-

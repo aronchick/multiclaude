@@ -31,9 +31,6 @@ const TypeWorkspace = state.AgentTypeWorkspace
 // Deprecated: Use state.AgentTypeReview directly.
 const TypeReview = state.AgentTypeReview
 
-// Deprecated: Use state.AgentTypePRShepherd directly.
-const TypePRShepherd = state.AgentTypePRShepherd
-
 // Embedded default prompts
 // Only supervisor and workspace are "hardcoded" - other agent types (worker, merge-queue, review)
 // should come from configurable agent definitions in agent-templates.
@@ -78,8 +75,6 @@ func LoadCustomPrompt(repoPath string, agentType state.AgentType) (string, error
 		filename = "WORKER.md"
 	case state.AgentTypeMergeQueue:
 		filename = "MERGE-QUEUE.md"
-	case state.AgentTypePRShepherd:
-		filename = "PR-SHEPHERD.md"
 	case state.AgentTypeWorkspace:
 		filename = "WORKSPACE.md"
 	case state.AgentTypeReview:

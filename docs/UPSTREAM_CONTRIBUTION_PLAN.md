@@ -85,13 +85,25 @@ gh pr create \
 
 ### Step 3: Track Upstream PR
 
+**CRITICAL: Comment on the fork PR immediately after creating upstream PR:**
+
+```bash
+# Comment on the fork PR with upstream link
+gh pr comment <fork-pr-number> --body \
+  "🚀 Contributed upstream: https://github.com/dlorenc/multiclaude/pull/XX
+
+Status: Pending review"
+```
+
+This creates a permanent record in the fork's PR history that this work made it upstream.
+
 Add to this document:
 
 ```markdown
 ### Pending Upstream Review
 
-- [ ] #XX - CI guard rails - https://github.com/dlorenc/multiclaude/pull/XX
-- [ ] #XX - Fork-aware workflows - https://github.com/dlorenc/multiclaude/pull/XX
+- [ ] #XX - CI guard rails - Fork PR: #46, Upstream: https://github.com/dlorenc/multiclaude/pull/XX
+- [ ] #XX - Fork-aware workflows - Fork PR: #47, Upstream: https://github.com/dlorenc/multiclaude/pull/XX
 ```
 
 ### Step 4: Handle Feedback
@@ -99,12 +111,38 @@ Add to this document:
 If upstream requests changes:
 1. Make changes on the `upstream/*` branch
 2. Push updates
-3. Merge back to fork if needed
+3. **Update fork PR comment** with feedback status:
+   ```bash
+   gh pr comment <fork-pr-number> --body \
+     "⚠️ Upstream PR needs changes: https://github.com/dlorenc/multiclaude/pull/XX
+
+   Feedback: [summary of requested changes]"
+   ```
+4. Merge back to fork if needed
 
 If upstream rejects:
-1. Document why in `FORK_MAINTENANCE_STRATEGY.md`
-2. Keep feature in fork
-3. Ensure it doesn't conflict with future upstream changes
+1. **Update fork PR comment** with rejection status:
+   ```bash
+   gh pr comment <fork-pr-number> --body \
+     "❌ Upstream PR closed: https://github.com/dlorenc/multiclaude/pull/XX
+
+   Reason: [explanation]
+   This feature remains fork-only."
+   ```
+2. Document why in `FORK_MAINTENANCE_STRATEGY.md`
+3. Keep feature in fork
+4. Ensure it doesn't conflict with future upstream changes
+
+If upstream merges:
+1. **Update fork PR comment** with success status:
+   ```bash
+   gh pr comment <fork-pr-number> --body \
+     "✅ Merged upstream: https://github.com/dlorenc/multiclaude/pull/XX
+
+   Merged in commit: [sha]"
+   ```
+2. Update status in this document (move from "Pending" to appropriate section)
+3. Celebrate! 🎉
 
 ## PR Template for Upstream
 

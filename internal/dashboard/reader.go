@@ -159,9 +159,9 @@ type AggregatedState struct {
 
 // MachineState represents the state from a single machine
 type MachineState struct {
-	Path        string                      `json:"path"`
+	Path        string                       `json:"path"`
 	Repos       map[string]*state.Repository `json:"repos"`
-	CurrentRepo string                      `json:"current_repo,omitempty"`
+	CurrentRepo string                       `json:"current_repo,omitempty"`
 }
 
 // MarshalJSON implements custom JSON marshaling for better API output
