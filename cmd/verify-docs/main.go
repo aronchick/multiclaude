@@ -100,6 +100,9 @@ func verifyStateSchema() Verification {
 	var extraFields []string
 
 	for name, fields := range codeStructs {
+		if *verbose {
+			fmt.Printf("Verifying struct: %s\n", name)
+		}
 		docFields := docStructs[name]
 		missingFields = append(missingFields, diffListPrefixed(fields, docFields, name)...)
 		extraFields = append(extraFields, diffListPrefixed(docFields, fields, name)...)
@@ -143,6 +146,10 @@ func verifySocketCommands() Verification {
 		return v
 	}
 
+	if *verbose {
+		fmt.Printf("Found %d commands in code, %d in docs\n", len(codeCommands), len(docCommands))
+	}
+
 	missing := diffList(codeCommands, docCommands)
 	extra := diffList(docCommands, codeCommands)
 
@@ -177,6 +184,9 @@ func verifyFilePaths() Verification {
 	missing := []string{}
 
 	for _, docFile := range docFiles {
+		if *verbose {
+			fmt.Printf("Checking references in %s\n", docFile)
+		}
 		content, err := os.ReadFile(docFile)
 		if err != nil {
 			continue // Skip missing docs
