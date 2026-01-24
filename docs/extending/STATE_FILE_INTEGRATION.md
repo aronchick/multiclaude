@@ -84,8 +84,6 @@ multiclaude_dir=$(multiclaude config --paths | jq -r .state_file)
 - `worker`: Executes specific tasks
 - `workspace`: Interactive workspace agent
 - `review`: Reviews a specific PR
-- `pr-shepherd`: Monitors PRs in fork mode
-- `generic-persistent`: Custom persistent agents
 
 ### TaskHistoryEntry Object
 
@@ -738,10 +736,7 @@ echo "$state" | jq -r '
 
 ### Example 3: Web Dashboard API
 
-> **Note:** The reference implementation (`internal/dashboard/`, `cmd/multiclaude-web`) does not exist.
-> See WEB_UI_DEVELOPMENT.md for design patterns if building a dashboard in a fork.
-
-A web dashboard would typically include:
+See `internal/dashboard/api.go` for a complete implementation with:
 - REST endpoints for repos, agents, history
 - Server-Sent Events for live updates
 - State watching with fsnotify

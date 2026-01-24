@@ -1,15 +1,8 @@
 # Socket API Reference
 
-> **NOTE: COMMAND VERIFICATION NEEDED**
->
-> Not all commands documented here have been verified against the current codebase.
-> Hook-related commands (`get_hook_config`, `update_hook_config`) are **not implemented**
-> as the event hooks system does not exist. Other commands should be verified against
-> `internal/daemon/daemon.go` before use.
-
 **Extension Point:** Programmatic control via Unix socket IPC
 
-This guide documents the socket API for building custom control tools, automation scripts, and alternative CLIs. The socket API provides programmatic access to multiclaude state and operations.
+This guide documents the complete socket API for building custom control tools, automation scripts, and alternative CLIs. The socket API provides **full read-write access** to multiclaude state and operations.
 
 ## Overview
 
@@ -1140,7 +1133,7 @@ client.setTimeout(60000);
 - **[`EXTENSIBILITY.md`](../EXTENSIBILITY.md)** - Overview of extension points
 - **[`STATE_FILE_INTEGRATION.md`](STATE_FILE_INTEGRATION.md)** - For read-only monitoring
 - `internal/socket/socket.go` - Socket implementation
-- `internal/daemon/daemon.go` - Request handlers (lines 574-653)
+- `internal/daemon/daemon.go` - Request handlers (lines 607-685)
 
 ## Contributing
 

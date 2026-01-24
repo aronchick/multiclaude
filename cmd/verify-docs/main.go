@@ -25,9 +25,7 @@ import (
 )
 
 var (
-	// fix is reserved for future auto-fix functionality
-	_ = flag.Bool("fix", false, "Automatically fix documentation (not yet implemented)")
-
+	fix     = flag.Bool("fix", false, "Automatically fix documentation (not yet implemented)")
 	verbose = flag.Bool("v", false, "Verbose output")
 )
 
