@@ -60,6 +60,8 @@ verify-docs:
 		git diff docs/DIRECTORY_STRUCTURE.md; \
 		exit 1; \
 	fi
+	@echo "==> Verifying extension documentation consistency..."
+	@go run ./cmd/verify-docs
 	@echo "✓ Generated docs are up to date"
 
 # Coverage check - matches CI coverage-check job
@@ -121,4 +123,3 @@ clean:
 	@rm -f coverage.out
 	@go clean -cache
 	@echo "✓ Clean complete"
-
