@@ -264,6 +264,119 @@ Examples:
 
 The supervisor will respond and help you make progress.
 
+## Environment Hygiene
+
+Maintain a clean working environment to prevent leaking sensitive data or polluting history.
+
+### Shell History Stealth
+
+Prefix sensitive commands with a space to prevent them from being recorded in shell history:
+
+```bash
+ export SECRET_TOKEN=xxx  # Note the leading space - won't be recorded
+ gh auth login --with-token < token.txt  # Won't appear in history
+```
+
+Or at session start:
+```bash
+unset HISTFILE  # Disables history recording for this session
+```
+
+### Pre-Completion Cleanup
+
+Before signaling completion, verify your environment is clean:
+
+```bash
+# Remove temporary files
+rm -f /tmp/multiclaude-*
+
+# Clear any exported secrets from environment
+unset SECRET_TOKEN API_KEY
+
+# Verify no credentials in working directory
+find . -name "*.env" -o -name "*credentials*" -o -name "*secret*" | grep -v ".git"
+```
+
+### Credential Handling
+
+- **Never commit credentials** - Check `git diff --staged` before committing
+- **Use environment variables** - Not hardcoded values
+- **Clean up after API calls** - Remove any temporary token files
+- **Verify .gitignore** - Ensure sensitive files are excluded
+
+### State Integrity Checklist
+
+Before `multiclaude agent complete`:
+- [ ] No temporary build artifacts left behind
+- [ ] No credentials in working directory
+- [ ] No sensitive data in git staging area
+- [ ] Environment variables cleaned up
+
+## Feature Integration Tasks
+
+When assigned to integrate functionality from another PR or codebase, follow these principles:
+
+### 1. Reuse First (CRITICAL)
+
+**Before writing ANY new code, search for existing functionality.**
+
+```bash
+# Search for existing functions that might do what you need
+grep -r "functionName" internal/ pkg/
+# Check for similar patterns in the codebase
+grep -rn "patternYouNeed" --include="*.go" .
+# Look for helper utilities
+ls internal/*/
+```
+
+Ask yourself:
+- Does a function already exist that does this?
+- Can I extend an existing type instead of creating a new one?
+- Is there a similar pattern elsewhere I can follow?
+
+### 2. Minimalist Extensions
+
+**If new code is required, add the minimum necessary. Avoid bloat.**
+
+- Prefer adding methods to existing types over creating new types
+- Prefer extending existing packages over creating new packages
+- Each new file must justify its existence
+
+### 3. Strategic PR Analysis
+
+When integrating from a source PR:
+
+```bash
+# Study the source PR
+gh pr view <number> --repo <owner>/<repo>
+gh pr diff <number> --repo <owner>/<repo>
+
+# List files changed
+gh pr view <number> --repo <owner>/<repo> --json files --jq '.files[].path'
+```
+
+Map source changes to the target architecture:
+- Which existing files would these changes touch?
+- Are there naming convention differences to reconcile?
+- What existing APIs can be leveraged?
+
+### 4. Integration Checklist
+
+Before submitting your integration PR:
+- [ ] All tests pass: `go test ./...`
+- [ ] Linting passes: `go vet ./...`
+- [ ] Code is formatted: `gofmt -w .`
+- [ ] Changes are minimal and focused
+- [ ] PR description explains adaptations made
+- [ ] Source PR is referenced
+
+### 5. Common Integration Patterns
+
+**Adding a CLI command**: Follow existing command structure in `internal/cli/cli.go`
+**Adding state fields**: Update structs in `internal/state/state.go`, then docs
+**Adding events**: Add to `internal/events/events.go`, update docs
+**Adding socket commands**: Add handler in daemon, update SOCKET_API.md
+
 ## Reporting Issues
 
 If you encounter a bug or unexpected behavior in multiclaude itself, you can generate a diagnostic report:
