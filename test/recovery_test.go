@@ -100,7 +100,7 @@ func TestCorruptedStateFileRecovery(t *testing.T) {
 func TestOrphanedTmuxSessionCleanup(t *testing.T) {
 	tmuxClient := tmux.NewClient()
 	if !tmuxClient.IsTmuxAvailable() {
-		t.Skip("tmux not available")
+		t.Fatal("tmux is required for this test but not available")
 	}
 
 	tmpDir := t.TempDir()
@@ -365,7 +365,7 @@ func TestDaemonCrashRecovery(t *testing.T) {
 	// state is preserved as-is.
 	tmuxClient := tmux.NewClient()
 	if !tmuxClient.IsTmuxAvailable() {
-		t.Skip("tmux not available, skipping crash recovery test")
+		t.Fatal("tmux is required for this test but not available")
 	}
 
 	tmpDir := t.TempDir()
@@ -590,7 +590,7 @@ func TestSlashCommandsEmbeddedInPrompts(t *testing.T) {
 	}
 
 	// Verify multiclaude CLI commands are referenced
-	expectedCLICommands := []string{"multiclaude list", "multiclaude work list", "multiclaude agent list-messages"}
+	expectedCLICommands := []string{"multiclaude repo list", "multiclaude worker list", "multiclaude message list"}
 	for _, cmd := range expectedCLICommands {
 		if !strings.Contains(slashPrompt, cmd) {
 			t.Errorf("Expected slash commands prompt to contain CLI command %q", cmd)

@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dlorenc/multiclaude/internal/agents"
 	"github.com/dlorenc/multiclaude/internal/hooks"
 	"github.com/dlorenc/multiclaude/internal/logging"
 	"github.com/dlorenc/multiclaude/internal/messages"
@@ -183,6 +184,32 @@ func getRequiredStringArg(args map[string]interface{}, key, description string) 
 	return val, socket.Response{}, true
 }
 
+// periodicLoop runs a function periodically at the specified interval.
+// If onStartup is provided, it's called immediately before entering the loop.
+// The onTick function is called on each timer tick.
+func (d *Daemon) periodicLoop(name string, interval time.Duration, onStartup, onTick func()) {
+	defer d.wg.Done()
+	d.logger.Info("Starting %s loop", name)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Run startup tasks if provided
+	if onStartup != nil {
+		onStartup()
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			onTick()
+		case <-d.ctx.Done():
+			d.logger.Info("%s loop stopped", name)
+			return
+		}
+	}
+}
+
 // serverLoop handles socket connections
 func (d *Daemon) serverLoop() {
 	defer d.wg.Done()
@@ -206,28 +233,12 @@ func (d *Daemon) serverLoop() {
 
 // healthCheckLoop periodically checks agent health
 func (d *Daemon) healthCheckLoop() {
-	defer d.wg.Done()
-	d.logger.Info("Starting health check loop")
-
-	ticker := time.NewTicker(2 * time.Minute)
-	defer ticker.Stop()
-
-	// Run once immediately on startup
-	d.checkAgentHealth()
-	d.rotateLogsIfNeeded()
-	d.cleanupMergedBranches()
-
-	for {
-		select {
-		case <-ticker.C:
-			d.checkAgentHealth()
-			d.rotateLogsIfNeeded()
-			d.cleanupMergedBranches()
-		case <-d.ctx.Done():
-			d.logger.Info("Health check loop stopped")
-			return
-		}
+	startup := func() {
+		d.checkAgentHealth()
+		d.rotateLogsIfNeeded()
+		d.cleanupMergedBranches()
 	}
+	d.periodicLoop("health check", 2*time.Minute, startup, startup)
 }
 
 // checkAgentHealth checks if agents are still alive
@@ -253,10 +264,7 @@ func (d *Daemon) checkAgentHealth() {
 				d.logger.Error("Failed to restore repo %s: %v, marking all agents for cleanup", repoName, err)
 				// Only mark for cleanup if restoration failed
 				for agentName := range repo.Agents {
-					if deadAgents[repoName] == nil {
-						deadAgents[repoName] = []string{}
-					}
-					deadAgents[repoName] = append(deadAgents[repoName], agentName)
+					appendToSliceMap(deadAgents, repoName, agentName)
 				}
 			} else {
 				d.logger.Info("Successfully restored tmux session and agents for repo %s", repoName)
@@ -269,10 +277,7 @@ func (d *Daemon) checkAgentHealth() {
 			// Check if agent is marked as ready for cleanup
 			if agent.ReadyForCleanup {
 				d.logger.Info("Agent %s is ready for cleanup", agentName)
-				if deadAgents[repoName] == nil {
-					deadAgents[repoName] = []string{}
-				}
-				deadAgents[repoName] = append(deadAgents[repoName], agentName)
+				appendToSliceMap(deadAgents, repoName, agentName)
 				continue
 			}
 
@@ -285,10 +290,7 @@ func (d *Daemon) checkAgentHealth() {
 
 			if !hasWindow {
 				d.logger.Warn("Agent %s window not found, marking for cleanup", agentName)
-				if deadAgents[repoName] == nil {
-					deadAgents[repoName] = []string{}
-				}
-				deadAgents[repoName] = append(deadAgents[repoName], agentName)
+				appendToSliceMap(deadAgents, repoName, agentName)
 				continue
 			}
 
@@ -297,8 +299,8 @@ func (d *Daemon) checkAgentHealth() {
 				if !isProcessAlive(agent.PID) {
 					d.logger.Warn("Agent %s process (PID %d) not running", agentName, agent.PID)
 
-					// For persistent agents (supervisor, merge-queue, workspace), attempt auto-restart
-					if agent.Type == state.AgentTypeSupervisor || agent.Type == state.AgentTypeMergeQueue || agent.Type == state.AgentTypeWorkspace {
+					// For persistent agents, attempt auto-restart
+					if agent.Type.IsPersistent() {
 						d.logger.Info("Attempting to auto-restart agent %s", agentName)
 						if err := d.restartAgent(repoName, agentName, agent, repo); err != nil {
 							d.logger.Error("Failed to restart agent %s: %v", agentName, err)
@@ -323,21 +325,7 @@ func (d *Daemon) checkAgentHealth() {
 
 // messageRouterLoop watches for new messages and delivers them
 func (d *Daemon) messageRouterLoop() {
-	defer d.wg.Done()
-	d.logger.Info("Starting message router loop")
-
-	ticker := time.NewTicker(2 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			d.routeMessages()
-		case <-d.ctx.Done():
-			d.logger.Info("Message router loop stopped")
-			return
-		}
-	}
+	d.periodicLoop("message router", 2*time.Minute, nil, d.routeMessages)
 }
 
 // routeMessages checks for pending messages and delivers them
@@ -402,21 +390,7 @@ func (d *Daemon) getMessageManager() *messages.Manager {
 
 // wakeLoop periodically wakes agents with status checks
 func (d *Daemon) wakeLoop() {
-	defer d.wg.Done()
-	d.logger.Info("Starting wake loop")
-
-	ticker := time.NewTicker(2 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			d.wakeAgents()
-		case <-d.ctx.Done():
-			d.logger.Info("Wake loop stopped")
-			return
-		}
-	}
+	d.periodicLoop("wake", 2*time.Minute, nil, d.wakeAgents)
 }
 
 // wakeAgents sends periodic nudges to agents
@@ -446,10 +420,14 @@ func (d *Daemon) wakeAgents() {
 				message = "Status check: Review worker progress and check merge queue."
 			case state.AgentTypeMergeQueue:
 				message = "Status check: Review open PRs and check CI status."
+			case state.AgentTypePRShepherd:
+				message = "Status check: Review PRs on upstream, check CI status, and rebase branches if needed."
 			case state.AgentTypeWorker:
 				message = "Status check: Update on your progress?"
 			case state.AgentTypeReview:
 				message = "Status check: Update on your review progress?"
+			case state.AgentTypeGenericPersistent:
+				message = "Status check: Update on your progress?"
 			}
 
 			// Send message using atomic method to avoid race conditions (issue #63)
@@ -663,6 +641,9 @@ func (d *Daemon) handleRequest(req socket.Request) socket.Response {
 	case "task_history":
 		return d.handleTaskHistory(req)
 
+	case "spawn_agent":
+		return d.handleSpawnAgent(req)
+
 	default:
 		return socket.Response{
 			Success: false,
@@ -725,13 +706,23 @@ func (d *Daemon) handleListRepos(req socket.Request) socket.Response {
 			sessionHealthy = hasSession
 		}
 
+		// Determine PR management mode
+		prManagementMode := "merge-queue"
+		if repo.ForkConfig.IsFork {
+			prManagementMode = "pr-shepherd"
+		}
+
 		repoDetails = append(repoDetails, map[string]interface{}{
-			"name":            repoName,
-			"github_url":      repo.GithubURL,
-			"tmux_session":    repo.TmuxSession,
-			"total_agents":    totalAgents,
-			"worker_count":    workerCount,
-			"session_healthy": sessionHealthy,
+			"name":               repoName,
+			"github_url":         repo.GithubURL,
+			"tmux_session":       repo.TmuxSession,
+			"total_agents":       totalAgents,
+			"worker_count":       workerCount,
+			"session_healthy":    sessionHealthy,
+			"is_fork":            repo.ForkConfig.IsFork,
+			"upstream_owner":     repo.ForkConfig.UpstreamOwner,
+			"upstream_repo":      repo.ForkConfig.UpstreamRepo,
+			"pr_management_mode": prManagementMode,
 		})
 	}
 
@@ -761,14 +752,45 @@ func (d *Daemon) handleAddRepo(req socket.Request) socket.Response {
 		mqConfig.Enabled = mqEnabled
 	}
 	if mqTrackMode, ok := req.Args["mq_track_mode"].(string); ok {
-		switch mqTrackMode {
-		case "all":
-			mqConfig.TrackMode = state.TrackModeAll
-		case "author":
-			mqConfig.TrackMode = state.TrackModeAuthor
-		case "assigned":
-			mqConfig.TrackMode = state.TrackModeAssigned
+		mode, err := state.ParseTrackMode(mqTrackMode)
+		if err != nil {
+			return socket.Response{Success: false, Error: err.Error()}
 		}
+		mqConfig.TrackMode = mode
+	}
+
+	// Parse fork configuration (optional)
+	var forkConfig state.ForkConfig
+	if isFork, ok := req.Args["is_fork"].(bool); ok {
+		forkConfig.IsFork = isFork
+	}
+	if upstreamURL, ok := req.Args["upstream_url"].(string); ok {
+		forkConfig.UpstreamURL = upstreamURL
+	}
+	if upstreamOwner, ok := req.Args["upstream_owner"].(string); ok {
+		forkConfig.UpstreamOwner = upstreamOwner
+	}
+	if upstreamRepo, ok := req.Args["upstream_repo"].(string); ok {
+		forkConfig.UpstreamRepo = upstreamRepo
+	}
+
+	// Parse PR shepherd configuration (optional, defaults for fork mode)
+	psConfig := state.DefaultPRShepherdConfig()
+	if psEnabled, ok := req.Args["ps_enabled"].(bool); ok {
+		psConfig.Enabled = psEnabled
+	}
+	if psTrackMode, ok := req.Args["ps_track_mode"].(string); ok {
+		mode, err := state.ParseTrackMode(psTrackMode)
+		if err != nil {
+			return socket.Response{Success: false, Error: err.Error()}
+		}
+		psConfig.TrackMode = mode
+	}
+
+	// If in fork mode, disable merge-queue and enable pr-shepherd by default
+	if forkConfig.IsFork {
+		mqConfig.Enabled = false
+		psConfig.Enabled = true
 	}
 
 	repo := &state.Repository{
@@ -776,13 +798,19 @@ func (d *Daemon) handleAddRepo(req socket.Request) socket.Response {
 		TmuxSession:      tmuxSession,
 		Agents:           make(map[string]state.Agent),
 		MergeQueueConfig: mqConfig,
+		PRShepherdConfig: psConfig,
+		ForkConfig:       forkConfig,
 	}
 
 	if err := d.state.AddRepo(name, repo); err != nil {
 		return socket.Response{Success: false, Error: err.Error()}
 	}
 
-	d.logger.Info("Added repository: %s (merge queue: enabled=%v, track=%s)", name, mqConfig.Enabled, mqConfig.TrackMode)
+	if forkConfig.IsFork {
+		d.logger.Info("Added repository: %s (fork of %s/%s, pr-shepherd: enabled=%v)", name, forkConfig.UpstreamOwner, forkConfig.UpstreamRepo, psConfig.Enabled)
+	} else {
+		d.logger.Info("Added repository: %s (merge queue: enabled=%v, track=%s)", name, mqConfig.Enabled, mqConfig.TrackMode)
+	}
 	return socket.Response{Success: true}
 }
 
@@ -978,7 +1006,7 @@ func (d *Daemon) handleCompleteAgent(req socket.Request) socket.Response {
 
 	agent, exists := d.state.GetAgent(repoName, agentName)
 	if !exists {
-		return socket.Response{Success: false, Error: fmt.Sprintf("agent '%s' not found in repository '%s' - check available agents with: multiclaude work list --repo %s", agentName, repoName, repoName)}
+		return socket.Response{Success: false, Error: fmt.Sprintf("agent '%s' not found in repository '%s' - check available agents with: multiclaude worker list --repo %s", agentName, repoName, repoName)}
 	}
 
 	// Mark as ready for cleanup
@@ -1058,7 +1086,7 @@ func (d *Daemon) handleRestartAgent(req socket.Request) socket.Response {
 
 	agent, exists := d.state.GetAgent(repoName, agentName)
 	if !exists {
-		return socket.Response{Success: false, Error: fmt.Sprintf("agent '%s' not found in repository '%s' - check available agents with: multiclaude work list --repo %s", agentName, repoName, repoName)}
+		return socket.Response{Success: false, Error: fmt.Sprintf("agent '%s' not found in repository '%s' - check available agents with: multiclaude worker list --repo %s", agentName, repoName, repoName)}
 	}
 
 	// Check if agent is marked for cleanup (completed)
@@ -1214,11 +1242,27 @@ func (d *Daemon) handleGetRepoConfig(req socket.Request) socket.Response {
 		mqConfig = state.DefaultMergeQueueConfig()
 	}
 
+	// Get PR shepherd config (use default if not set)
+	psConfig := repo.PRShepherdConfig
+	if psConfig.TrackMode == "" {
+		psConfig = state.DefaultPRShepherdConfig()
+	}
+
+	// Get fork config
+	forkConfig := repo.ForkConfig
+
 	return socket.Response{
 		Success: true,
 		Data: map[string]interface{}{
-			"mq_enabled":    mqConfig.Enabled,
-			"mq_track_mode": string(mqConfig.TrackMode),
+			"mq_enabled":      mqConfig.Enabled,
+			"mq_track_mode":   string(mqConfig.TrackMode),
+			"ps_enabled":      psConfig.Enabled,
+			"ps_track_mode":   string(psConfig.TrackMode),
+			"is_fork":         forkConfig.IsFork,
+			"upstream_url":    forkConfig.UpstreamURL,
+			"upstream_owner":  forkConfig.UpstreamOwner,
+			"upstream_repo":   forkConfig.UpstreamRepo,
+			"force_fork_mode": forkConfig.ForceForkMode,
 		},
 	}
 }
@@ -1243,16 +1287,11 @@ func (d *Daemon) handleUpdateRepoConfig(req socket.Request) socket.Response {
 		mqUpdated = true
 	}
 	if mqTrackMode, ok := req.Args["mq_track_mode"].(string); ok {
-		switch mqTrackMode {
-		case "all":
-			currentMQConfig.TrackMode = state.TrackModeAll
-		case "author":
-			currentMQConfig.TrackMode = state.TrackModeAuthor
-		case "assigned":
-			currentMQConfig.TrackMode = state.TrackModeAssigned
-		default:
-			return socket.Response{Success: false, Error: fmt.Sprintf("invalid track mode: %s", mqTrackMode)}
+		mode, err := state.ParseTrackMode(mqTrackMode)
+		if err != nil {
+			return socket.Response{Success: false, Error: err.Error()}
 		}
+		currentMQConfig.TrackMode = mode
 		mqUpdated = true
 	}
 
@@ -1261,6 +1300,34 @@ func (d *Daemon) handleUpdateRepoConfig(req socket.Request) socket.Response {
 			return socket.Response{Success: false, Error: err.Error()}
 		}
 		d.logger.Info("Updated merge queue config for repo %s: enabled=%v, track=%s", name, currentMQConfig.Enabled, currentMQConfig.TrackMode)
+	}
+
+	// Get current PR shepherd config
+	currentPSConfig, err := d.state.GetPRShepherdConfig(name)
+	if err != nil {
+		return socket.Response{Success: false, Error: err.Error()}
+	}
+
+	// Update PR shepherd config with provided values
+	psUpdated := false
+	if psEnabled, ok := req.Args["ps_enabled"].(bool); ok {
+		currentPSConfig.Enabled = psEnabled
+		psUpdated = true
+	}
+	if psTrackMode, ok := req.Args["ps_track_mode"].(string); ok {
+		mode, err := state.ParseTrackMode(psTrackMode)
+		if err != nil {
+			return socket.Response{Success: false, Error: err.Error()}
+		}
+		currentPSConfig.TrackMode = mode
+		psUpdated = true
+	}
+
+	if psUpdated {
+		if err := d.state.UpdatePRShepherdConfig(name, currentPSConfig); err != nil {
+			return socket.Response{Success: false, Error: err.Error()}
+		}
+		d.logger.Info("Updated PR shepherd config for repo %s: enabled=%v, track=%s", name, currentPSConfig.Enabled, currentPSConfig.TrackMode)
 	}
 
 	return socket.Response{Success: true}
@@ -1431,6 +1498,159 @@ func (d *Daemon) handleTaskHistory(req socket.Request) socket.Response {
 	return socket.Response{Success: true, Data: result}
 }
 
+// handleSpawnAgent spawns a new agent with an inline prompt (no hardcoded type).
+// This is used by the supervisor to spawn agents based on markdown definitions.
+// Args:
+//   - repo: repository name
+//   - name: agent name (used for tmux window and worktree)
+//   - class: "persistent" or "ephemeral"
+//   - prompt: full prompt text to use as system prompt
+//   - task: optional task description (for ephemeral/worker agents)
+func (d *Daemon) handleSpawnAgent(req socket.Request) socket.Response {
+	repoName, errResp, ok := getRequiredStringArg(req.Args, "repo", "repository name is required")
+	if !ok {
+		return errResp
+	}
+
+	agentName, errResp, ok := getRequiredStringArg(req.Args, "name", "agent name is required")
+	if !ok {
+		return errResp
+	}
+
+	agentClass, errResp, ok := getRequiredStringArg(req.Args, "class", "agent class is required (persistent or ephemeral)")
+	if !ok {
+		return errResp
+	}
+
+	promptText, errResp, ok := getRequiredStringArg(req.Args, "prompt", "prompt text is required")
+	if !ok {
+		return errResp
+	}
+
+	// Validate class
+	if agentClass != "persistent" && agentClass != "ephemeral" {
+		return socket.Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid agent class %q: must be 'persistent' or 'ephemeral'", agentClass),
+		}
+	}
+
+	// Get optional task
+	task, _ := req.Args["task"].(string)
+
+	// Get repository
+	repo, exists := d.state.GetRepo(repoName)
+	if !exists {
+		return socket.Response{Success: false, Error: fmt.Sprintf("repository %q not found", repoName)}
+	}
+
+	// Check if agent already exists
+	if _, exists := d.state.GetAgent(repoName, agentName); exists {
+		return socket.Response{Success: false, Error: fmt.Sprintf("agent %q already exists in repository %q", agentName, repoName)}
+	}
+
+	// Determine agent type based on class
+	var agentType state.AgentType
+	if agentClass == "persistent" {
+		// For persistent agents, use specific type if known or generic persistent
+		switch agentName {
+		case "merge-queue":
+			agentType = state.AgentTypeMergeQueue
+		case "pr-shepherd":
+			agentType = state.AgentTypePRShepherd
+		default:
+			agentType = state.AgentTypeGenericPersistent
+		}
+	} else {
+		// Ephemeral agents are workers or reviewers
+		if strings.Contains(strings.ToLower(agentName), "review") {
+			agentType = state.AgentTypeReview
+		} else {
+			agentType = state.AgentTypeWorker
+		}
+	}
+
+	// Create worktree for the agent
+	repoPath := d.paths.RepoDir(repoName)
+	worktreePath := d.paths.AgentWorktree(repoName, agentName)
+
+	wt := worktree.NewManager(repoPath)
+
+	// Create worktree - persistent agents use repo dir, ephemeral get their own branch
+	if agentClass == "persistent" {
+		// Persistent agents work directly in the repo directory
+		worktreePath = repoPath
+	} else {
+		// Ephemeral agents get their own worktree with a new branch
+		branchName := fmt.Sprintf("work/%s", agentName)
+		if err := wt.CreateNewBranch(worktreePath, branchName, "HEAD"); err != nil {
+			return socket.Response{Success: false, Error: fmt.Sprintf("failed to create worktree: %v", err)}
+		}
+	}
+
+	// Create tmux window with working directory
+	cmd := exec.Command("tmux", "new-window", "-d", "-t", repo.TmuxSession, "-n", agentName, "-c", worktreePath)
+	if err := cmd.Run(); err != nil {
+		// Clean up worktree on failure (only for ephemeral agents that have their own worktree)
+		if agentClass != "persistent" {
+			wt.Remove(worktreePath, true)
+		}
+		return socket.Response{Success: false, Error: fmt.Sprintf("failed to create tmux window: %v", err)}
+	}
+
+	// Write prompt to file
+	promptDir := filepath.Join(d.paths.Root, "prompts")
+	if err := os.MkdirAll(promptDir, 0755); err != nil {
+		return socket.Response{Success: false, Error: fmt.Sprintf("failed to create prompt directory: %v", err)}
+	}
+
+	promptPath := filepath.Join(promptDir, fmt.Sprintf("%s.md", agentName))
+	if err := os.WriteFile(promptPath, []byte(promptText), 0644); err != nil {
+		return socket.Response{Success: false, Error: fmt.Sprintf("failed to write prompt file: %v", err)}
+	}
+
+	// Copy hooks config
+	if err := hooks.CopyConfig(repoPath, worktreePath); err != nil {
+		d.logger.Warn("Failed to copy hooks config: %v", err)
+	}
+
+	// Start Claude in the tmux window
+	cfg := agentStartConfig{
+		agentName:  agentName,
+		agentType:  agentType,
+		promptFile: promptPath,
+		workDir:    worktreePath,
+	}
+
+	if err := d.startAgentWithConfig(repoName, repo, cfg); err != nil {
+		// Clean up on failure
+		d.tmux.KillWindow(d.ctx, repo.TmuxSession, agentName)
+		if agentClass != "persistent" {
+			wt.Remove(worktreePath, true)
+		}
+		return socket.Response{Success: false, Error: fmt.Sprintf("failed to start agent: %v", err)}
+	}
+
+	// Update task if provided
+	if task != "" {
+		agent, _ := d.state.GetAgent(repoName, agentName)
+		agent.Task = task
+		d.state.UpdateAgent(repoName, agentName, agent)
+	}
+
+	d.logger.Info("Spawned agent %s/%s (class=%s, type=%s)", repoName, agentName, agentClass, agentType)
+
+	return socket.Response{
+		Success: true,
+		Data: map[string]interface{}{
+			"name":          agentName,
+			"class":         agentClass,
+			"type":          string(agentType),
+			"worktree_path": worktreePath,
+		},
+	}
+}
+
 // cleanupOrphanedWorktrees removes worktree directories without git tracking
 func (d *Daemon) cleanupOrphanedWorktrees() {
 	repoNames := d.state.ListRepos()
@@ -1560,9 +1780,8 @@ func (d *Daemon) restoreDeadAgents(repoName string, repo *state.Repository) {
 		// Process is dead but window exists - restart persistent agents with --resume
 		d.logger.Info("Agent %s process (PID %d) is dead, attempting restart", agentName, agent.PID)
 
-		// For persistent agents (supervisor, merge-queue, workspace), auto-restart
-		// For transient agents (workers, review), they will be cleaned up by health check
-		if agent.Type == state.AgentTypeSupervisor || agent.Type == state.AgentTypeMergeQueue || agent.Type == state.AgentTypeWorkspace {
+		// For persistent agents, auto-restart. For transient agents, they will be cleaned up by health check
+		if agent.Type.IsPersistent() {
 			if err := d.restartAgent(repoName, agentName, agent, repo); err != nil {
 				d.logger.Error("Failed to restart agent %s: %v", agentName, err)
 			} else {
@@ -1604,26 +1823,14 @@ func (d *Daemon) restoreRepoAgents(repoName string, repo *state.Repository) erro
 		mqConfig = state.DefaultMergeQueueConfig()
 	}
 
-	// Create merge-queue window only if enabled
-	if mqConfig.Enabled {
-		cmd = exec.Command("tmux", "new-window", "-d", "-t", repo.TmuxSession, "-n", "merge-queue", "-c", repoPath)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to create merge-queue window: %w", err)
-		}
-	}
-
 	// Start supervisor agent
-	if err := d.startAgent(repoName, repo, "supervisor", prompts.TypeSupervisor, repoPath); err != nil {
+	if err := d.startAgent(repoName, repo, "supervisor", state.AgentTypeSupervisor, repoPath); err != nil {
 		d.logger.Error("Failed to start supervisor for %s: %v", repoName, err)
 	}
 
-	// Start merge-queue agent only if enabled
-	if mqConfig.Enabled {
-		if err := d.startMergeQueueAgent(repoName, repo, repoPath, mqConfig); err != nil {
-			d.logger.Error("Failed to start merge-queue for %s: %v", repoName, err)
-		}
-	} else {
-		d.logger.Info("Merge queue is disabled for repo %s, skipping merge-queue agent", repoName)
+	// Send agent definitions to supervisor (includes merge-queue config for supervisor to decide)
+	if err := d.sendAgentDefinitionsToSupervisor(repoName, repoPath, mqConfig); err != nil {
+		d.logger.Warn("Failed to send agent definitions to supervisor: %v", err)
 	}
 
 	// Create and restore workspace
@@ -1672,12 +1879,122 @@ func (d *Daemon) restoreRepoAgents(repoName string, repo *state.Repository) erro
 		if err := cmd.Run(); err != nil {
 			d.logger.Error("Failed to create workspace window: %v", err)
 		} else {
-			if err := d.startAgent(repoName, repo, "workspace", prompts.TypeWorkspace, workspacePath); err != nil {
+			if err := d.startAgent(repoName, repo, "workspace", state.AgentTypeWorkspace, workspacePath); err != nil {
 				d.logger.Error("Failed to start workspace for %s: %v", repoName, err)
 			}
 		}
 	}
 
+	return nil
+}
+
+// sendAgentDefinitionsToSupervisor reads agent definitions and sends them to the supervisor.
+// This allows the supervisor to know about available agents and spawn them as needed.
+func (d *Daemon) sendAgentDefinitionsToSupervisor(repoName, repoPath string, mqConfig state.MergeQueueConfig) error {
+	// Get repo to check fork config
+	repo, exists := d.state.GetRepo(repoName)
+	var forkConfig state.ForkConfig
+	var psConfig state.PRShepherdConfig
+	if exists {
+		forkConfig = repo.ForkConfig
+		psConfig = repo.PRShepherdConfig
+	}
+
+	// Create agent reader
+	localAgentsDir := d.paths.RepoAgentsDir(repoName)
+	reader := agents.NewReader(localAgentsDir, repoPath)
+
+	// Read all definitions
+	definitions, err := reader.ReadAllDefinitions()
+	if err != nil {
+		return fmt.Errorf("failed to read agent definitions: %w", err)
+	}
+
+	if len(definitions) == 0 {
+		d.logger.Info("No agent definitions found for repo %s", repoName)
+		return nil
+	}
+
+	// Build message with all definitions - send raw content for Claude to interpret
+	var sb strings.Builder
+	sb.WriteString("Agent definitions available for this repository:\n\n")
+
+	// Include fork mode information if applicable
+	isForkMode := forkConfig.IsFork || forkConfig.ForceForkMode
+	if isForkMode {
+		sb.WriteString("## Fork Mode (ACTIVE)\n")
+		sb.WriteString(fmt.Sprintf("This repository is a fork of **%s/%s**.\n\n", forkConfig.UpstreamOwner, forkConfig.UpstreamRepo))
+		sb.WriteString("**Key differences in fork mode:**\n")
+		sb.WriteString("- Use `pr-shepherd` instead of `merge-queue`\n")
+		sb.WriteString("- PRs target the upstream repository\n")
+		sb.WriteString("- You cannot merge PRs - only prepare them for review\n\n")
+
+		sb.WriteString("## PR Shepherd Configuration\n")
+		if psConfig.Enabled {
+			sb.WriteString("- Enabled: yes\n")
+			sb.WriteString(fmt.Sprintf("- Track Mode: %s\n\n", psConfig.TrackMode))
+		} else {
+			sb.WriteString("- Enabled: no (do NOT spawn pr-shepherd agent)\n\n")
+		}
+	} else {
+		// Include merge-queue configuration for non-fork mode
+		sb.WriteString("## Merge Queue Configuration\n")
+		if mqConfig.Enabled {
+			sb.WriteString("- Enabled: yes\n")
+			sb.WriteString(fmt.Sprintf("- Track Mode: %s\n\n", mqConfig.TrackMode))
+		} else {
+			sb.WriteString("- Enabled: no (do NOT spawn merge-queue agent)\n\n")
+		}
+	}
+
+	for i, def := range definitions {
+		// Skip merge-queue definition in fork mode
+		if isForkMode && def.Name == "merge-queue" {
+			continue
+		}
+		// Skip pr-shepherd definition in non-fork mode
+		if !isForkMode && def.Name == "pr-shepherd" {
+			continue
+		}
+
+		sb.WriteString(fmt.Sprintf("--- Agent Definition %d: %s (source: %s) ---\n", i+1, def.Name, def.Source))
+
+		// For merge-queue, prepend the tracking mode configuration if enabled
+		if def.Name == "merge-queue" && mqConfig.Enabled {
+			trackModePrompt := prompts.GenerateTrackingModePrompt(string(mqConfig.TrackMode))
+			sb.WriteString(trackModePrompt)
+			sb.WriteString("\n\n")
+		}
+
+		// For pr-shepherd, prepend the tracking mode configuration if enabled
+		if def.Name == "pr-shepherd" && psConfig.Enabled {
+			trackModePrompt := prompts.GenerateTrackingModePrompt(string(psConfig.TrackMode))
+			sb.WriteString(trackModePrompt)
+			sb.WriteString("\n\n")
+			// Also add fork workflow context
+			forkPrompt := prompts.GenerateForkWorkflowPrompt(forkConfig.UpstreamOwner, forkConfig.UpstreamRepo, forkConfig.UpstreamOwner)
+			sb.WriteString(forkPrompt)
+			sb.WriteString("\n\n")
+		}
+
+		sb.WriteString(def.Content)
+		sb.WriteString("\n--- End of Definition ---\n\n")
+	}
+
+	sb.WriteString("Review these definitions and determine which agents to spawn.\n")
+	sb.WriteString("For each agent, decide:\n")
+	sb.WriteString("- Class: Is it persistent (long-running, auto-restarts) or ephemeral (task-based, cleans up)?\n")
+	sb.WriteString("- Spawn now: Should this agent start immediately on repository init?\n\n")
+	sb.WriteString("To spawn an agent, save the prompt to a file and use:\n")
+	sb.WriteString(fmt.Sprintf("  multiclaude agents spawn --repo %s --name <agent-name> --class <persistent|ephemeral> --prompt-file <file>\n", repoName))
+
+	// Send message to supervisor
+	msgMgr := d.getMessageManager()
+	if _, err := msgMgr.Send(repoName, "daemon", "supervisor", sb.String()); err != nil {
+		return fmt.Errorf("failed to send message to supervisor: %w", err)
+	}
+
+	d.logger.Info("Sent %d agent definition(s) to supervisor for repo %s", len(definitions), repoName)
 	return nil
 }
 
@@ -1700,12 +2017,6 @@ type agentStartConfig struct {
 
 // startAgentWithConfig is the unified agent start function that handles all common logic
 func (d *Daemon) startAgentWithConfig(repoName string, repo *state.Repository, cfg agentStartConfig) error {
-	// Resolve claude binary path
-	binaryPath, err := d.getClaudeBinaryPath()
-	if err != nil {
-		return fmt.Errorf("failed to resolve claude binary: %w", err)
-	}
-
 	// Generate session ID
 	sessionID, err := claude.GenerateSessionID()
 	if err != nil {
@@ -1718,24 +2029,35 @@ func (d *Daemon) startAgentWithConfig(repoName string, repo *state.Repository, c
 		d.logger.Warn("Failed to copy hooks config: %v", err)
 	}
 
-	// Build CLI command
-	claudeCmd := fmt.Sprintf("%s --session-id %s --dangerously-skip-permissions --append-system-prompt-file %s",
-		binaryPath, sessionID, cfg.promptFile)
+	var pid int
 
-	// Send command to tmux window
-	target := fmt.Sprintf("%s:%s", repo.TmuxSession, cfg.agentName)
-	cmd := exec.Command("tmux", "send-keys", "-t", target, claudeCmd, "C-m")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to start Claude in tmux: %w", err)
-	}
+	// Skip actual Claude startup in test mode
+	if os.Getenv("MULTICLAUDE_TEST_MODE") != "1" {
+		// Resolve claude binary path
+		binaryPath, err := d.getClaudeBinaryPath()
+		if err != nil {
+			return fmt.Errorf("failed to resolve claude binary: %w", err)
+		}
 
-	// Wait a moment for Claude to start
-	time.Sleep(500 * time.Millisecond)
+		// Build CLI command
+		claudeCmd := fmt.Sprintf("%s --session-id %s --dangerously-skip-permissions --append-system-prompt-file %s",
+			binaryPath, sessionID, cfg.promptFile)
 
-	// Get PID
-	pid, err := d.tmux.GetPanePID(d.ctx, repo.TmuxSession, cfg.agentName)
-	if err != nil {
-		return fmt.Errorf("failed to get Claude PID: %w", err)
+		// Send command to tmux window
+		target := fmt.Sprintf("%s:%s", repo.TmuxSession, cfg.agentName)
+		cmd := exec.Command("tmux", "send-keys", "-t", target, claudeCmd, "C-m")
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to start Claude in tmux: %w", err)
+		}
+
+		// Wait a moment for Claude to start
+		time.Sleep(500 * time.Millisecond)
+
+		// Get PID
+		pid, err = d.tmux.GetPanePID(d.ctx, repo.TmuxSession, cfg.agentName)
+		if err != nil {
+			return fmt.Errorf("failed to get Claude PID: %w", err)
+		}
 	}
 
 	// Register agent with state
@@ -1757,7 +2079,7 @@ func (d *Daemon) startAgentWithConfig(repoName string, repo *state.Repository, c
 }
 
 // startAgent starts a Claude agent in a tmux window and registers it with state
-func (d *Daemon) startAgent(repoName string, repo *state.Repository, agentName string, agentType prompts.AgentType, workDir string) error {
+func (d *Daemon) startAgent(repoName string, repo *state.Repository, agentName string, agentType state.AgentType, workDir string) error {
 	promptFile, err := d.writePromptFile(repoName, agentType, agentName)
 	if err != nil {
 		return fmt.Errorf("failed to write prompt file: %w", err)
@@ -1765,35 +2087,14 @@ func (d *Daemon) startAgent(repoName string, repo *state.Repository, agentName s
 
 	return d.startAgentWithConfig(repoName, repo, agentStartConfig{
 		agentName:  agentName,
-		agentType:  state.AgentType(agentType),
+		agentType:  agentType,
 		promptFile: promptFile,
 		workDir:    workDir,
 	})
 }
 
-// startMergeQueueAgent starts a merge-queue agent with tracking mode configuration
-func (d *Daemon) startMergeQueueAgent(repoName string, repo *state.Repository, workDir string, mqConfig state.MergeQueueConfig) error {
-	promptFile, err := d.writePromptFileWithPrefix(repoName, prompts.TypeMergeQueue, "merge-queue",
-		prompts.GenerateTrackingModePrompt(string(mqConfig.TrackMode)))
-	if err != nil {
-		return fmt.Errorf("failed to write prompt file: %w", err)
-	}
-
-	if err := d.startAgentWithConfig(repoName, repo, agentStartConfig{
-		agentName:  "merge-queue",
-		agentType:  state.AgentTypeMergeQueue,
-		promptFile: promptFile,
-		workDir:    workDir,
-	}); err != nil {
-		return err
-	}
-
-	d.logger.Info("Merge-queue agent started with track mode: %s", mqConfig.TrackMode)
-	return nil
-}
-
 // writePromptFileWithPrefix writes a prompt file with an optional prefix prepended to the content
-func (d *Daemon) writePromptFileWithPrefix(repoName string, agentType prompts.AgentType, agentName, prefix string) (string, error) {
+func (d *Daemon) writePromptFileWithPrefix(repoName string, agentType state.AgentType, agentName, prefix string) (string, error) {
 	repoPath := d.paths.RepoDir(repoName)
 
 	// Get the base prompt (without CLI docs since we don't have them in daemon context)
@@ -1871,7 +2172,7 @@ func (d *Daemon) restartAgent(repoName, agentName string, agent state.Agent, rep
 }
 
 // writePromptFile writes the agent prompt to a file and returns the path
-func (d *Daemon) writePromptFile(repoName string, agentType prompts.AgentType, agentName string) (string, error) {
+func (d *Daemon) writePromptFile(repoName string, agentType state.AgentType, agentName string) (string, error) {
 	return d.writePromptFileWithPrefix(repoName, agentType, agentName, "")
 }
 
@@ -1885,6 +2186,14 @@ func isProcessAlive(pid int) bool {
 	// Send signal 0 to check if process exists (doesn't actually signal, just checks)
 	err = process.Signal(syscall.Signal(0))
 	return err == nil
+}
+
+// appendToSliceMap appends a value to a slice in a map, initializing the slice if needed.
+func appendToSliceMap(m map[string][]string, key, value string) {
+	if m[key] == nil {
+		m[key] = []string{}
+	}
+	m[key] = append(m[key], value)
 }
 
 // Run runs the daemon in the foreground

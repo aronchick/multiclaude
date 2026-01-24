@@ -23,7 +23,7 @@ This project embraces controlled chaos: multiple agents work simultaneously, pot
 go build ./cmd/multiclaude         # Build binary
 go install ./cmd/multiclaude       # Install to $GOPATH/bin
 
-# Test
+# Test (run before pushing)
 go test ./...                      # All tests
 go test ./internal/daemon          # Single package
 go test -v ./test/...              # E2E tests (requires tmux)
@@ -71,13 +71,14 @@ MULTICLAUDE_TEST_MODE=1 go test ./test/...  # Skip Claude startup
 | `internal/state` | Persistence | `State`, `Agent`, `Repository` |
 | `internal/messages` | Inter-agent IPC | `Manager`, `Message` |
 | `internal/prompts` | Agent system prompts | Embedded `*.md` files, `GetSlashCommandsPrompt()` |
-| `internal/prompts/commands` | Slash command templates | `GenerateCommandsDir()`, embedded `*.md` (legacy) |
+| `internal/prompts/commands` | Slash command templates | `GenerateCommandsDir()`, embedded `*.md` |
 | `internal/hooks` | Claude hooks config | `CopyConfig()` |
 | `internal/worktree` | Git worktree ops | `Manager`, `WorktreeInfo` |
-| `internal/tmux` | Internal tmux client | `Client` (internal use) |
 | `internal/socket` | Unix socket IPC | `Server`, `Client`, `Request` |
 | `internal/errors` | User-friendly errors | `CLIError`, error constructors |
 | `internal/names` | Worker name generation | `Generate()` (adjective-animal) |
+| `internal/templates` | Agent prompt templates | Template loading and embedding |
+| `internal/agents` | Agent management | Agent definition loading |
 | `pkg/config` | Path configuration | `Paths`, `NewTestPaths()` |
 | `pkg/tmux` | **Public** tmux library | `Client` (multiline support) |
 | `pkg/claude` | **Public** Claude runner | `Runner`, `Config` |
@@ -94,10 +95,11 @@ MULTICLAUDE_TEST_MODE=1 go test ./test/...  # Skip Claude startup
 
 | File | What It Does |
 |------|--------------|
-| `internal/cli/cli.go` | **Large file** (~3700 lines) with all CLI commands |
+| `internal/cli/cli.go` | **Large file** (~5500 lines) with all CLI commands |
 | `internal/daemon/daemon.go` | Daemon implementation with all loops |
 | `internal/state/state.go` | State struct with mutex-protected operations |
-| `internal/prompts/*.md` | Agent system prompts (embedded at compile) |
+| `internal/prompts/*.md` | Supervisor/workspace prompts (embedded at compile) |
+| `internal/templates/agent-templates/*.md` | Worker/merge-queue/reviewer/pr-shepherd prompt templates |
 | `pkg/tmux/client.go` | Public tmux library with `SendKeysLiteralWithEnter` |
 
 ## Patterns and Conventions
@@ -108,7 +110,7 @@ Use structured errors from `internal/errors` for user-facing messages:
 
 ```go
 // Good: User gets helpful message + suggestion
-return errors.DaemonNotRunning()  // "daemon is not running" + "Try: multiclaude start"
+return errors.DaemonNotRunning()  // "daemon is not running" + "Try: multiclaude daemon start"
 
 // Good: Wrap with context
 return errors.GitOperationFailed("clone", err)
@@ -124,10 +126,11 @@ Always use atomic writes for crash safety:
 ```go
 // internal/state/state.go pattern
 func (s *State) saveUnlocked() error {
-    data, _ := json.MarshalIndent(s, "", "  ")
-    tmpPath := s.path + ".tmp"
-    os.WriteFile(tmpPath, data, 0644)  // Write temp
-    os.Rename(tmpPath, s.path)          // Atomic rename
+    data, err := json.MarshalIndent(s, "", "  ")
+    if err != nil {
+        return fmt.Errorf("failed to marshal state: %w", err)
+    }
+    return atomicWrite(s.path, data)  // Atomic write via temp file + rename
 }
 ```
 
@@ -149,7 +152,7 @@ tmux.SendEnter(session, window)  // Enter might be lost!
 Agents infer their context from working directory:
 
 ```go
-// internal/cli/cli.go:2385
+// internal/cli/cli.go:3494
 func (c *CLI) inferRepoFromCwd() (string, error) {
     // Checks if cwd is under ~/.multiclaude/wts/<repo>/ or repos/<repo>/
 }
@@ -181,12 +184,12 @@ paths := config.NewTestPaths(tmpDir)  // Sets up all paths correctly
 defer os.RemoveAll(tmpDir)
 
 // Use NewWithPaths for testing
-cli := cli.NewWithPaths(paths, "claude")
+cli := cli.NewWithPaths(paths)
 ```
 
 ## Agent System
 
-See `AGENTS.md` for detailed agent documentation including:
+See `docs/AGENTS.md` for detailed agent documentation including:
 - Agent types and their roles
 - Message routing implementation
 - Prompt system and customization
@@ -203,10 +206,21 @@ If this repository is a fork, see `docs/UPSTREAM_WORKFLOW.md` for:
 
 **Key principle:** All PRs should be focused and upstream-ready by default, even if you don't immediately contribute them back.
 
+## Extensibility
+
+External tools can integrate via:
+
+| Extension Point | Use Cases | Documentation |
+|----------------|-----------|---------------|
+| **State File** | Monitoring, analytics | [`docs/extending/STATE_FILE_INTEGRATION.md`](docs/extending/STATE_FILE_INTEGRATION.md) |
+| **Socket API** | Custom CLIs, automation | [`docs/extending/SOCKET_API.md`](docs/extending/SOCKET_API.md) |
+
+**Note:** Web UIs, event hooks, and notification systems are explicitly out of scope per ROADMAP.md.
+
 ## Contributing Checklist
 
 When modifying agent behavior:
-- [ ] Update the relevant prompt in `internal/prompts/*.md`
+- [ ] Update the relevant prompt (supervisor/workspace in `internal/prompts/*.md`, others in `internal/templates/agent-templates/*.md`)
 - [ ] Run `go generate ./pkg/config` if CLI changed
 - [ ] Test with tmux: `go test ./test/...`
 - [ ] Check state persistence: `go test ./internal/state/...`
@@ -221,6 +235,11 @@ When modifying daemon loops:
 - [ ] Consider interaction with health check (2 min cycle)
 - [ ] Test crash recovery: `go test ./test/ -run Recovery`
 - [ ] Verify state atomicity with concurrent access tests
+
+When modifying extension points (state, socket API):
+- [ ] Update relevant extension documentation in `docs/extending/`
+- [ ] Update code examples in docs to match new behavior
+- [ ] Note: Event hooks and web UI are not implemented (out of scope per ROADMAP.md)
 
 ## Runtime Directories
 
@@ -246,10 +265,10 @@ When modifying daemon loops:
 
 ```bash
 # Attach to see what it's doing
-multiclaude attach <agent-name> --read-only
+multiclaude agent attach <agent-name> --read-only
 
 # Check its messages
-multiclaude agent list-messages  # (from agent's tmux window)
+multiclaude message list  # (from agent's tmux window)
 
 # Manually nudge via daemon logs
 tail -f ~/.multiclaude/daemon.log
@@ -270,7 +289,9 @@ multiclaude cleanup            # Actually clean up
 
 ```bash
 # Prompts are embedded at compile time
-vim internal/prompts/worker.md
+# Supervisor/workspace prompts: internal/prompts/*.md
+# Worker/merge-queue/reviewer prompts: internal/templates/agent-templates/*.md
+vim internal/templates/agent-templates/worker.md
 go build ./cmd/multiclaude
 # New workers will use updated prompt
 ```

@@ -837,6 +837,56 @@ func TestBranchExists(t *testing.T) {
 	}
 }
 
+// TestCreateWorktreeForExistingBranch tests creating a worktree for a branch
+// that already exists locally. This is the scenario that occurs when using
+// --push-to with a branch that has already been checked out locally (fix for #278).
+func TestCreateWorktreeForExistingBranch(t *testing.T) {
+	repoPath, cleanup := createTestRepo(t)
+	defer cleanup()
+
+	manager := NewManager(repoPath)
+
+	// Create a branch first
+	branchName := "existing-branch"
+	createBranch(t, repoPath, branchName)
+
+	// Verify branch exists
+	exists, err := manager.BranchExists(branchName)
+	if err != nil {
+		t.Fatalf("Failed to check branch existence: %v", err)
+	}
+	if !exists {
+		t.Fatal("Branch should exist after creation")
+	}
+
+	// Create worktree for the existing branch using Create() (not CreateNewBranch())
+	wtPath := filepath.Join(repoPath, "wt-existing")
+	if err := manager.Create(wtPath, branchName); err != nil {
+		t.Fatalf("Failed to create worktree for existing branch: %v", err)
+	}
+
+	// Verify worktree directory exists
+	if _, err := os.Stat(wtPath); os.IsNotExist(err) {
+		t.Error("Worktree directory was not created")
+	}
+
+	// Verify worktree is registered in git
+	wtExists, err := manager.Exists(wtPath)
+	if err != nil {
+		t.Fatalf("Failed to check worktree existence: %v", err)
+	}
+	if !wtExists {
+		t.Error("Worktree not registered in git")
+	}
+
+	// Verify that using CreateNewBranch() would fail for an existing branch
+	wtPath2 := filepath.Join(repoPath, "wt-should-fail")
+	err = manager.CreateNewBranch(wtPath2, branchName, "main")
+	if err == nil {
+		t.Error("CreateNewBranch should fail when branch already exists")
+	}
+}
+
 func TestRenameBranch(t *testing.T) {
 	repoPath, cleanup := createTestRepo(t)
 	defer cleanup()
@@ -1495,9 +1545,7 @@ func TestListBranchesWithPrefix(t *testing.T) {
 
 		// Empty prefix should return empty (git for-each-ref refs/heads/ returns all)
 		// Actually testing the behavior
-		if branches == nil {
-			branches = []string{} // normalize
-		}
+		_ = branches // branches is checked above; behavior is validated by not erroring
 	})
 }
 
@@ -2463,6 +2511,183 @@ func TestHasUnpushedCommitsNonExistentPath(t *testing.T) {
 	}
 }
 
+func TestHasUnpushedCommitsWithTrackingBranch(t *testing.T) {
+	t.Run("detects unpushed commits with tracking branch", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Create a bare remote repository
+		remoteDir, err := os.MkdirTemp("", "remote-*")
+		if err != nil {
+			t.Fatalf("Failed to create remote dir: %v", err)
+		}
+		defer os.RemoveAll(remoteDir)
+
+		cmd := exec.Command("git", "init", "--bare")
+		cmd.Dir = remoteDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to init bare repo: %v", err)
+		}
+
+		// Add remote
+		cmd = exec.Command("git", "remote", "add", "origin", remoteDir)
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add remote: %v", err)
+		}
+
+		// Push main branch to establish tracking
+		cmd = exec.Command("git", "push", "-u", "origin", "main")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push main: %v", err)
+		}
+
+		// Create a worktree with tracking branch
+		wtPath := filepath.Join(repoPath, "wt-tracked")
+		if err := manager.CreateNewBranch(wtPath, "feature/tracked", "main"); err != nil {
+			t.Fatalf("Failed to create worktree: %v", err)
+		}
+		defer manager.Remove(wtPath, true)
+
+		// Set up tracking branch
+		cmd = exec.Command("git", "push", "-u", "origin", "feature/tracked")
+		cmd.Dir = wtPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push branch: %v", err)
+		}
+
+		// Should have no unpushed commits yet
+		hasUnpushed, err := HasUnpushedCommits(wtPath)
+		if err != nil {
+			t.Fatalf("Failed to check unpushed commits: %v", err)
+		}
+		if hasUnpushed {
+			t.Error("Should have no unpushed commits initially")
+		}
+
+		// Create a commit
+		testFile := filepath.Join(wtPath, "feature.txt")
+		if err := os.WriteFile(testFile, []byte("new feature"), 0644); err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+
+		cmd = exec.Command("git", "add", "feature.txt")
+		cmd.Dir = wtPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to git add: %v", err)
+		}
+
+		cmd = exec.Command("git", "commit", "-m", "Add feature")
+		cmd.Dir = wtPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to commit: %v", err)
+		}
+
+		// Now should detect unpushed commits
+		hasUnpushed, err = HasUnpushedCommits(wtPath)
+		if err != nil {
+			t.Fatalf("Failed to check unpushed commits: %v", err)
+		}
+		if !hasUnpushed {
+			t.Error("Should detect unpushed commits")
+		}
+
+		// Push the commit
+		cmd = exec.Command("git", "push")
+		cmd.Dir = wtPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push: %v", err)
+		}
+
+		// Should have no unpushed commits after push
+		hasUnpushed, err = HasUnpushedCommits(wtPath)
+		if err != nil {
+			t.Fatalf("Failed to check unpushed commits: %v", err)
+		}
+		if hasUnpushed {
+			t.Error("Should have no unpushed commits after push")
+		}
+	})
+
+	t.Run("detects multiple unpushed commits", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Create a bare remote repository
+		remoteDir, err := os.MkdirTemp("", "remote-*")
+		if err != nil {
+			t.Fatalf("Failed to create remote dir: %v", err)
+		}
+		defer os.RemoveAll(remoteDir)
+
+		cmd := exec.Command("git", "init", "--bare")
+		cmd.Dir = remoteDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to init bare repo: %v", err)
+		}
+
+		// Add remote and push main
+		cmd = exec.Command("git", "remote", "add", "origin", remoteDir)
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add remote: %v", err)
+		}
+
+		cmd = exec.Command("git", "push", "-u", "origin", "main")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push main: %v", err)
+		}
+
+		// Create worktree
+		wtPath := filepath.Join(repoPath, "wt-multi")
+		if err := manager.CreateNewBranch(wtPath, "feature/multi", "main"); err != nil {
+			t.Fatalf("Failed to create worktree: %v", err)
+		}
+		defer manager.Remove(wtPath, true)
+
+		cmd = exec.Command("git", "push", "-u", "origin", "feature/multi")
+		cmd.Dir = wtPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push branch: %v", err)
+		}
+
+		// Create multiple commits
+		for i := 1; i <= 3; i++ {
+			testFile := filepath.Join(wtPath, fmt.Sprintf("file%d.txt", i))
+			if err := os.WriteFile(testFile, []byte(fmt.Sprintf("content %d", i)), 0644); err != nil {
+				t.Fatalf("Failed to create test file: %v", err)
+			}
+
+			cmd = exec.Command("git", "add", fmt.Sprintf("file%d.txt", i))
+			cmd.Dir = wtPath
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("Failed to git add: %v", err)
+			}
+
+			cmd = exec.Command("git", "commit", "-m", fmt.Sprintf("Commit %d", i))
+			cmd.Dir = wtPath
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("Failed to commit: %v", err)
+			}
+		}
+
+		// Should detect unpushed commits
+		hasUnpushed, err := HasUnpushedCommits(wtPath)
+		if err != nil {
+			t.Fatalf("Failed to check unpushed commits: %v", err)
+		}
+		if !hasUnpushed {
+			t.Error("Should detect multiple unpushed commits")
+		}
+	})
+}
+
 func TestCleanupOrphanedWithDetails(t *testing.T) {
 	t.Run("returns details on successful removal", func(t *testing.T) {
 		repoPath, cleanup := createTestRepo(t)
@@ -2589,4 +2814,178 @@ func TestCleanupOrphanedBackwardsCompatibility(t *testing.T) {
 	if len(removed) != 1 {
 		t.Errorf("Expected 1 removed, got %d", len(removed))
 	}
+}
+
+func TestDeleteRemoteBranch(t *testing.T) {
+	t.Run("successfully deletes remote branch", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Create a bare remote repository to simulate origin
+		remoteDir, err := os.MkdirTemp("", "remote-*")
+		if err != nil {
+			t.Fatalf("Failed to create remote dir: %v", err)
+		}
+		defer os.RemoveAll(remoteDir)
+
+		// Initialize bare repo
+		cmd := exec.Command("git", "init", "--bare")
+		cmd.Dir = remoteDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to init bare repo: %v", err)
+		}
+
+		// Add remote
+		cmd = exec.Command("git", "remote", "add", "origin", remoteDir)
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add remote: %v", err)
+		}
+
+		// Create and push a branch
+		createBranch(t, repoPath, "work/to-delete")
+		cmd = exec.Command("git", "push", "-u", "origin", "work/to-delete")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push branch: %v", err)
+		}
+
+		// Delete the remote branch
+		err = manager.DeleteRemoteBranch("origin", "work/to-delete")
+		if err != nil {
+			t.Fatalf("DeleteRemoteBranch failed: %v", err)
+		}
+
+		// Verify branch was deleted from remote
+		cmd = exec.Command("git", "ls-remote", "--heads", "origin", "work/to-delete")
+		cmd.Dir = repoPath
+		output, _ := cmd.Output()
+		if len(output) > 0 {
+			t.Error("Remote branch should be deleted but still exists")
+		}
+	})
+
+	t.Run("errors when remote doesn't exist", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		err := manager.DeleteRemoteBranch("nonexistent", "some-branch")
+		if err == nil {
+			t.Error("Expected error when remote doesn't exist")
+		}
+	})
+
+	t.Run("errors when branch doesn't exist on remote", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Create a bare remote repository
+		remoteDir, err := os.MkdirTemp("", "remote-*")
+		if err != nil {
+			t.Fatalf("Failed to create remote dir: %v", err)
+		}
+		defer os.RemoveAll(remoteDir)
+
+		cmd := exec.Command("git", "init", "--bare")
+		cmd.Dir = remoteDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to init bare repo: %v", err)
+		}
+
+		// Add remote
+		cmd = exec.Command("git", "remote", "add", "origin", remoteDir)
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add remote: %v", err)
+		}
+
+		// Try to delete a branch that doesn't exist
+		err = manager.DeleteRemoteBranch("origin", "nonexistent-branch")
+		if err == nil {
+			t.Error("Expected error when branch doesn't exist on remote")
+		}
+	})
+}
+
+func TestCleanupMergedBranchesWithRemoteDeletion(t *testing.T) {
+	t.Run("deletes both local and remote merged branches", func(t *testing.T) {
+		repoPath, cleanup := createTestRepo(t)
+		defer cleanup()
+
+		manager := NewManager(repoPath)
+
+		// Create a bare remote repository
+		remoteDir, err := os.MkdirTemp("", "remote-*")
+		if err != nil {
+			t.Fatalf("Failed to create remote dir: %v", err)
+		}
+		defer os.RemoveAll(remoteDir)
+
+		cmd := exec.Command("git", "init", "--bare")
+		cmd.Dir = remoteDir
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to init bare repo: %v", err)
+		}
+
+		// Add remote
+		cmd = exec.Command("git", "remote", "add", "origin", remoteDir)
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to add remote: %v", err)
+		}
+
+		// Push main branch first
+		cmd = exec.Command("git", "push", "-u", "origin", "main")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push main: %v", err)
+		}
+
+		// Create a merged branch
+		createBranch(t, repoPath, "work/merged-remote")
+
+		// Push the branch
+		cmd = exec.Command("git", "push", "-u", "origin", "work/merged-remote")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to push branch: %v", err)
+		}
+
+		// Fetch to update remote tracking
+		cmd = exec.Command("git", "fetch", "origin")
+		cmd.Dir = repoPath
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("Failed to fetch: %v", err)
+		}
+
+		// Clean up merged branches with remote deletion
+		deleted, err := manager.CleanupMergedBranches("work/", true)
+		if err != nil {
+			t.Fatalf("CleanupMergedBranches failed: %v", err)
+		}
+
+		if len(deleted) == 0 {
+			t.Error("Expected at least one branch to be deleted")
+		}
+
+		// Verify local branch is deleted
+		exists, _ := manager.BranchExists("work/merged-remote")
+		if exists {
+			t.Error("Local branch should be deleted")
+		}
+
+		// Verify remote branch is deleted
+		cmd = exec.Command("git", "ls-remote", "--heads", "origin", "work/merged-remote")
+		cmd.Dir = repoPath
+		output, _ := cmd.Output()
+		if len(output) > 0 {
+			t.Error("Remote branch should be deleted but still exists")
+		}
+	})
 }
