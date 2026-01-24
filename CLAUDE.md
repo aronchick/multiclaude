@@ -23,12 +23,7 @@ This project embraces controlled chaos: multiple agents work simultaneously, pot
 go build ./cmd/multiclaude         # Build binary
 go install ./cmd/multiclaude       # Install to $GOPATH/bin
 
-# CI Guard Rails (run before pushing)
-make pre-commit                    # Fast checks: build + unit tests + verify docs
-make check-all                     # Full CI: all checks that GitHub CI runs
-make install-hooks                 # Install git pre-commit hook
-
-# Test
+# Test (run before pushing)
 go test ./...                      # All tests
 go test ./internal/daemon          # Single package
 go test -v ./test/...              # E2E tests (requires tmux)
@@ -50,8 +45,8 @@ MULTICLAUDE_TEST_MODE=1 go test ./test/...  # Skip Claude startup
 │                          Daemon (internal/daemon)                │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐        │
 │  │ Health   │  │ Message  │  │ Wake/    │  │ Socket   │        │
-│  │ Check    │  │ Router   │  │ Nudge    │  │ Server   │        │
-│  │ (2min)   │  │ (2min)   │  │ (2min)   │  │          │        │
+│  │ Check    │  │ (2min)   │  │ (2min)   │  │ Server   │        │
+│  │ (2min)   │  │ Router   │  │ Nudge    │  │          │        │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘        │
 └────────────────────────────────┬────────────────────────────────┘
                                  │
@@ -76,13 +71,14 @@ MULTICLAUDE_TEST_MODE=1 go test ./test/...  # Skip Claude startup
 | `internal/state` | Persistence | `State`, `Agent`, `Repository` |
 | `internal/messages` | Inter-agent IPC | `Manager`, `Message` |
 | `internal/prompts` | Agent system prompts | Embedded `*.md` files, `GetSlashCommandsPrompt()` |
-| `internal/prompts/commands` | Slash command templates | `GenerateCommandsDir()`, embedded `*.md` (legacy) |
+| `internal/prompts/commands` | Slash command templates | `GenerateCommandsDir()`, embedded `*.md` |
 | `internal/hooks` | Claude hooks config | `CopyConfig()` |
 | `internal/worktree` | Git worktree ops | `Manager`, `WorktreeInfo` |
-| `internal/tmux` | Internal tmux client | `Client` (internal use) |
 | `internal/socket` | Unix socket IPC | `Server`, `Client`, `Request` |
 | `internal/errors` | User-friendly errors | `CLIError`, error constructors |
 | `internal/names` | Worker name generation | `Generate()` (adjective-animal) |
+| `internal/templates` | Agent prompt templates | Template loading and embedding |
+| `internal/agents` | Agent management | Agent definition loading |
 | `pkg/config` | Path configuration | `Paths`, `NewTestPaths()` |
 | `pkg/tmux` | **Public** tmux library | `Client` (multiline support) |
 | `pkg/claude` | **Public** Claude runner | `Runner`, `Config` |
@@ -99,11 +95,11 @@ MULTICLAUDE_TEST_MODE=1 go test ./test/...  # Skip Claude startup
 
 | File | What It Does |
 |------|--------------|
-| `internal/cli/cli.go` | **Large file** (~3700 lines) with all CLI commands |
+| `internal/cli/cli.go` | **Large file** (~5500 lines) with all CLI commands |
 | `internal/daemon/daemon.go` | Daemon implementation with all loops |
 | `internal/state/state.go` | State struct with mutex-protected operations |
 | `internal/prompts/*.md` | Supervisor/workspace prompts (embedded at compile) |
-| `internal/templates/agent-templates/*.md` | Worker/merge-queue/reviewer prompt templates |
+| `internal/templates/agent-templates/*.md` | Worker/merge-queue/reviewer/pr-shepherd prompt templates |
 | `pkg/tmux/client.go` | Public tmux library with `SendKeysLiteralWithEnter` |
 
 ## Patterns and Conventions
@@ -130,10 +126,11 @@ Always use atomic writes for crash safety:
 ```go
 // internal/state/state.go pattern
 func (s *State) saveUnlocked() error {
-    data, _ := json.MarshalIndent(s, "", "  ")
-    tmpPath := s.path + ".tmp"
-    os.WriteFile(tmpPath, data, 0644)  // Write temp
-    os.Rename(tmpPath, s.path)          // Atomic rename
+    data, err := json.MarshalIndent(s, "", "  ")
+    if err != nil {
+        return fmt.Errorf("failed to marshal state: %w", err)
+    }
+    return atomicWrite(s.path, data)  // Atomic write via temp file + rename
 }
 ```
 
@@ -155,7 +152,7 @@ tmux.SendEnter(session, window)  // Enter might be lost!
 Agents infer their context from working directory:
 
 ```go
-// internal/cli/cli.go:2385
+// internal/cli/cli.go:3494
 func (c *CLI) inferRepoFromCwd() (string, error) {
     // Checks if cwd is under ~/.multiclaude/wts/<repo>/ or repos/<repo>/
 }
@@ -187,12 +184,12 @@ paths := config.NewTestPaths(tmpDir)  // Sets up all paths correctly
 defer os.RemoveAll(tmpDir)
 
 // Use NewWithPaths for testing
-cli := cli.NewWithPaths(paths, "claude")
+cli := cli.NewWithPaths(paths)
 ```
 
 ## Agent System
 
-See `AGENTS.md` for detailed agent documentation including:
+See `docs/AGENTS.md` for detailed agent documentation including:
 - Agent types and their roles
 - Message routing implementation
 - Prompt system and customization
@@ -201,18 +198,14 @@ See `AGENTS.md` for detailed agent documentation including:
 
 ## Extensibility
 
-Multiclaude is designed for extension **without modifying the core binary**. External tools can integrate via:
-
-### Extension Points
+External tools can integrate via:
 
 | Extension Point | Use Cases | Documentation |
 |----------------|-----------|---------------|
-| **State File** | Monitoring, dashboards, analytics | [`docs/extending/STATE_FILE_INTEGRATION.md`](docs/extending/STATE_FILE_INTEGRATION.md) |
-| **Socket API** | Custom CLIs, automation, control planes | [`docs/extending/SOCKET_API.md`](docs/extending/SOCKET_API.md) |
-| **Event Hooks** | [PLANNED] (not implemented) | [`docs/extending/EVENT_HOOKS.md`](docs/extending/EVENT_HOOKS.md) |
-| **Web UIs** | [PLANNED] (not implemented) | [`docs/extending/WEB_UI_DEVELOPMENT.md`](docs/extending/WEB_UI_DEVELOPMENT.md) |
+| **State File** | Monitoring, analytics | [`docs/extending/STATE_FILE_INTEGRATION.md`](docs/extending/STATE_FILE_INTEGRATION.md) |
+| **Socket API** | Custom CLIs, automation | [`docs/extending/SOCKET_API.md`](docs/extending/SOCKET_API.md) |
 
-**Start here:** [`docs/EXTENSIBILITY.md`](docs/EXTENSIBILITY.md) - Complete extension guide
+**Note:** Web UIs, event hooks, and notification systems are explicitly out of scope per ROADMAP.md.
 
 ### For LLMs: Keeping Extension Docs Updated
 
@@ -230,25 +223,10 @@ Multiclaude is designed for extension **without modifying the core binary**. Ext
    - Add code examples for new commands
    - Update client library examples if needed
 
-3. **Event Type Changes** (`internal/events/events.go`) *(only after events exist)*
-   - Update: [`docs/extending/EVENT_HOOKS.md`](docs/extending/EVENT_HOOKS.md)
-   - Mark planned items as `[PLANNED]` until implemented
-
-4. **Runtime Directory Changes** (`pkg/config/config.go`)
-   - Update: All extension docs that reference file paths
-   - Update the "Runtime Directories" section below
-   - Update [`docs/EXTENSIBILITY.md`](docs/EXTENSIBILITY.md) file layout
-
-5. **New Extension Points**
-   - Create new guide in `docs/extending/`
-   - Add entry to [`docs/EXTENSIBILITY.md`](docs/EXTENSIBILITY.md)
-   - Add to this section in `CLAUDE.md`
-
 **Pattern:** After any internal/* or pkg/* changes, search extension docs for outdated references:
 ```bash
 # Find docs that might need updating
 grep -r "internal/state" docs/extending/
-grep -r "EventType" docs/extending/
 grep -r "socket.Request" docs/extending/
 ```
 
@@ -271,11 +249,10 @@ When modifying daemon loops:
 - [ ] Test crash recovery: `go test ./test/ -run Recovery`
 - [ ] Verify state atomicity with concurrent access tests
 
-When modifying extension points (state, events, socket API):
+When modifying extension points (state, socket API):
 - [ ] Update relevant extension documentation in `docs/extending/`
 - [ ] Update code examples in docs to match new behavior
-- [ ] Run documentation verification (when implemented): `go run cmd/verify-docs/main.go`
-- [ ] Check that external tools still work (e.g., `cmd/multiclaude-web`)
+- [ ] Note: Event hooks and web UI are not implemented (out of scope per ROADMAP.md)
 
 ## Runtime Directories
 

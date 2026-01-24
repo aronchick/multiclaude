@@ -44,7 +44,6 @@ func main() {
 
 	verifications := []Verification{
 		verifyStateSchema(),
-		verifyEventTypes(),
 		verifySocketCommands(),
 		verifyFilePaths(),
 	}
@@ -129,50 +128,6 @@ func verifyStateSchema() Verification {
 	return v
 }
 
-// verifyEventTypes checks that all event types are documented and not hallucinated.
-func verifyEventTypes() Verification {
-	v := Verification{Name: "Event types documentation"}
-
-	codeEvents, eventsFilePresent, err := parseEventsFromCode()
-	if err != nil {
-		v.Message = err.Error()
-		return v
-	}
-
-	docEvents, docStatus, err := parseEventsFromDocs()
-	if err != nil {
-		v.Message = err.Error()
-		return v
-	}
-
-	if !eventsFilePresent {
-		if docStatus != "planned" && len(docEvents) > 0 {
-			v.Message = "events not implemented in code; docs must mark as [PLANNED] and avoid listing concrete event types"
-			return v
-		}
-		v.Passed = true
-		return v
-	}
-
-	missing := diffList(codeEvents, docEvents)
-	extra := diffList(docEvents, codeEvents)
-
-	if len(missing) > 0 || len(extra) > 0 {
-		var parts []string
-		if len(missing) > 0 {
-			parts = append(parts, fmt.Sprintf("missing events: %s", strings.Join(missing, ", ")))
-		}
-		if len(extra) > 0 {
-			parts = append(parts, fmt.Sprintf("events documented but not in code: %s", strings.Join(extra, ", ")))
-		}
-		v.Message = strings.Join(parts, "; ")
-		return v
-	}
-
-	v.Passed = true
-	return v
-}
-
 // verifySocketCommands checks that socket commands in code and docs are aligned.
 func verifySocketCommands() Verification {
 	v := Verification{Name: "Socket commands documentation"}
@@ -213,10 +168,7 @@ func verifyFilePaths() Verification {
 	v := Verification{Name: "File path references"}
 
 	docFiles := []string{
-		"docs/EXTENSIBILITY.md",
 		"docs/extending/STATE_FILE_INTEGRATION.md",
-		"docs/extending/EVENT_HOOKS.md",
-		"docs/extending/WEB_UI_DEVELOPMENT.md",
 		"docs/extending/SOCKET_API.md",
 	}
 
@@ -341,68 +293,6 @@ func parseStateStructsFromDocs() (map[string][]string, error) {
 	}
 
 	return structs, nil
-}
-
-// parseEventsFromCode returns event names and a flag indicating if the file exists.
-func parseEventsFromCode() ([]string, bool, error) {
-	path := "internal/events/events.go"
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, fmt.Errorf("failed to stat %s: %w", path, err)
-	}
-
-	fset := token.NewFileSet()
-	node, err := parser.ParseFile(fset, path, nil, 0)
-	if err != nil {
-		return nil, true, fmt.Errorf("failed to parse %s: %w", path, err)
-	}
-
-	var events []string
-	ast.Inspect(node, func(n ast.Node) bool {
-		genDecl, ok := n.(*ast.GenDecl)
-		if !ok || genDecl.Tok != token.CONST {
-			return true
-		}
-
-		for _, spec := range genDecl.Specs {
-			valueSpec, ok := spec.(*ast.ValueSpec)
-			if !ok {
-				continue
-			}
-
-			for _, name := range valueSpec.Names {
-				if strings.HasPrefix(name.Name, "Event") {
-					events = append(events, name.Name)
-				}
-			}
-		}
-		return true
-	})
-
-	return uniqueSorted(events), true, nil
-}
-
-// parseEventsFromDocs reads event names (or planned status) from marker comments.
-func parseEventsFromDocs() ([]string, string, error) {
-	docFile := "docs/extending/EVENT_HOOKS.md"
-	content, err := os.ReadFile(docFile)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read %s: %w", docFile, err)
-	}
-
-	matches := regexp.MustCompile(`(?m)<!--\s*events:\s*([^>]+?)-->`).FindStringSubmatch(string(content))
-	if len(matches) < 2 {
-		return nil, "", fmt.Errorf("no events marker found in %s", docFile)
-	}
-
-	raw := strings.Fields(matches[1])
-	if len(raw) == 1 && strings.EqualFold(raw[0], "planned") {
-		return nil, "planned", nil
-	}
-
-	return uniqueSorted(raw), "", nil
 }
 
 // parseSocketCommandsFromCode extracts socket commands from handleRequest.

@@ -14,19 +14,146 @@ The daemon persists state to `~/.multiclaude/state.json` and writes it atomicall
 ```json
 {
   "repos": {
-    "<repo-name>": {
-      "github_url": "https://github.com/owner/repo",
-      "tmux_session": "mc-repo",
+    "<repo-name>": { /* Repository object */ }
+  },
+  "current_repo": "my-repo",  // Optional: default repository
+  "hooks": { /* HookConfig object */ }
+}
+```
+
+### Repository Object
+
+```json
+{
+  "github_url": "https://github.com/user/repo",
+  "tmux_session": "mc-my-repo",
+  "agents": {
+    "<agent-name>": { /* Agent object */ }
+  },
+  "task_history": [ /* TaskHistoryEntry objects */ ],
+  "merge_queue_config": { /* MergeQueueConfig object */ },
+  "pr_shepherd_config": { /* PRShepherdConfig object */ },
+  "fork_config": { /* ForkConfig object */ },
+  "target_branch": "main"
+}
+```
+
+### Agent Object
+
+```json
+{
+  "type": "worker",                    // "supervisor" | "worker" | "merge-queue" | "workspace" | "review" | "pr-shepherd"
+  "worktree_path": "/path/to/worktree",
+  "tmux_window": "0",                  // Window index in tmux session
+  "session_id": "claude-session-id",
+  "pid": 12345,                        // Process ID (0 if not running)
+  "task": "Implement feature X",       // Only for workers
+  "summary": "Added auth module",      // Only for workers (completion summary)
+  "failure_reason": "Tests failed",    // Only for workers (if task failed)
+  "created_at": "2024-01-15T10:30:00Z",
+  "last_nudge": "2024-01-15T10:35:00Z",
+  "ready_for_cleanup": false           // Only for workers (signals completion)
+}
+```
+
+**Agent Types:**
+- `supervisor`: Main orchestrator for the repository
+- `merge-queue`: Monitors and merges approved PRs
+- `worker`: Executes specific tasks
+- `workspace`: Interactive workspace agent
+- `review`: Reviews a specific PR
+- `pr-shepherd`: Monitors PRs in fork mode
+- `generic-persistent`: Custom persistent agents
+
+### TaskHistoryEntry Object
+
+```json
+{
+  "name": "clever-fox",                // Worker name
+  "task": "Add user authentication",   // Task description
+  "branch": "multiclaude/clever-fox",  // Git branch
+  "pr_url": "https://github.com/user/repo/pull/42",
+  "pr_number": 42,
+  "status": "merged",                  // See status values below
+  "summary": "Implemented JWT-based auth with refresh tokens",
+  "failure_reason": "",                // Populated if status is "failed"
+  "created_at": "2024-01-15T10:00:00Z",
+  "completed_at": "2024-01-15T11:30:00Z"
+}
+```
+
+**Status Values:**
+- `open`: PR created, not yet merged or closed
+- `merged`: PR was merged successfully
+- `closed`: PR was closed without merging
+- `no-pr`: Task completed but no PR was created
+- `failed`: Task failed (see `failure_reason`)
+- `unknown`: Status couldn't be determined
+
+### MergeQueueConfig Object
+
+```json
+{
+  "enabled": true,                     // Whether merge-queue agent runs
+  "track_mode": "all"                  // "all" | "author" | "assigned"
+}
+```
+
+**Track Modes:**
+- `all`: Monitor all PRs in the repository
+- `author`: Only PRs where multiclaude user is the author
+- `assigned`: Only PRs where multiclaude user is assigned
+
+### PRShepherdConfig Object
+
+```json
+{
+  "enabled": true,                     // Whether pr-shepherd agent runs
+  "track_mode": "author"               // "all" | "author" | "assigned"
+}
+```
+
+### ForkConfig Object
+
+```json
+{
+  "is_fork": true,
+  "upstream_url": "https://github.com/upstream/repo",
+  "upstream_owner": "upstream",
+  "upstream_repo": "repo",
+  "force_fork_mode": false
+}
+```
+
+### HookConfig Object
+
+```json
+{
+  "on_event": "/usr/local/bin/notify.sh",          // Catch-all hook
+  "on_pr_created": "/usr/local/bin/slack-pr.sh",
+  "on_agent_idle": "",
+  "on_merge_complete": "",
+  "on_agent_started": "",
+  "on_agent_stopped": "",
+  "on_task_assigned": "",
+  "on_ci_failed": "/usr/local/bin/alert-ci.sh",
+  "on_worker_stuck": "",
+  "on_message_sent": ""
+}
+```
+
+## Example State File
+
+```json
+{
+  "repos": {
+    "my-app": {
+      "github_url": "https://github.com/user/my-app",
+      "tmux_session": "mc-my-app",
       "agents": {
-        "<agent-name>": {
-          "type": "supervisor|worker|merge-queue|pr-shepherd|workspace|review|generic-persistent",
-          "worktree_path": "/path/to/worktree",
-          "tmux_window": "window-name",
-          "session_id": "uuid",
+        "supervisor": {
+          "type": "supervisor",
           "pid": 12345,
-          "task": "task description",
-          "summary": "optional summary",
-          "failure_reason": "optional failure",
           "created_at": "2025-01-01T00:00:00Z",
           "last_nudge": "2025-01-01T00:00:00Z",
           "ready_for_cleanup": false
@@ -35,36 +162,34 @@ The daemon persists state to `~/.multiclaude/state.json` and writes it atomicall
       "task_history": [
         {
           "name": "clever-fox",
-          "task": "...",
+          "task": "Add auth",
           "branch": "work/clever-fox",
-          "pr_url": "https://github.com/...",
+          "pr_url": "https://github.com/user/my-app/pull/42",
           "pr_number": 42,
-          "status": "open|merged|closed|no-pr|failed|unknown",
-          "summary": "optional summary",
-          "failure_reason": "optional failure",
+          "status": "merged",
           "created_at": "2025-01-01T00:00:00Z",
           "completed_at": "2025-01-02T00:00:00Z"
         }
       ],
       "merge_queue_config": {
         "enabled": true,
-        "track_mode": "all|author|assigned"
+        "track_mode": "all"
       },
       "pr_shepherd_config": {
         "enabled": true,
-        "track_mode": "all|author|assigned"
+        "track_mode": "author"
       },
       "fork_config": {
         "is_fork": true,
-        "upstream_url": "https://github.com/upstream/repo",
-        "upstream_owner": "upstream",
-        "upstream_repo": "repo",
+        "upstream_url": "https://github.com/original/my-app",
+        "upstream_owner": "original",
+        "upstream_repo": "my-app",
         "force_fork_mode": false
       },
       "target_branch": "main"
     }
   },
-  "current_repo": "<repo-name>"
+  "current_repo": "my-app"
 }
 ```
 
