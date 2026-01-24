@@ -215,7 +215,7 @@ CLI communicates with daemon via Unix socket at `~/.multiclaude/daemon.sock`.
 
 ### Repository Initialization
 
-`multiclaude init <github-url>`
+`multiclaude repo init <github-url>`
 
 1. Clone repo to `~/.multiclaude/repos/<name>`
 2. Create tmux session `mc-<name>`
@@ -225,7 +225,7 @@ CLI communicates with daemon via Unix socket at `~/.multiclaude/daemon.sock`.
 
 ### Worker Creation
 
-`multiclaude work "task description"`
+`multiclaude worker create "task description"`
 
 1. Generate Docker-style name
 2. Create worktree from main (or `--branch`)
@@ -242,7 +242,7 @@ CLI communicates with daemon via Unix socket at `~/.multiclaude/daemon.sock`.
 
 ### Worker Removal
 
-`multiclaude work rm <name>`
+`multiclaude worker rm <name>`
 
 1. Check for uncommitted changes (warn if found)
 2. Check for unpushed commits (warn if found)
@@ -266,10 +266,12 @@ claude --session-id "<uuid>" \
 
 ### Role Prompts
 
-Default prompts are embedded in the binary. Repositories can extend them with:
-- `.multiclaude/SUPERVISOR.md`
-- `.multiclaude/WORKER.md`
-- `.multiclaude/REVIEWER.md`
+Default prompts are embedded in the binary. Repositories can customize agents with:
+- `.multiclaude/agents/worker.md` - Worker agent definition
+- `.multiclaude/agents/merge-queue.md` - Merge-queue agent definition
+- `.multiclaude/agents/review.md` - Review agent definition
+
+**Deprecated:** The old files (`SUPERVISOR.md`, `WORKER.md`, `REVIEWER.md` directly in `.multiclaude/`) are deprecated.
 
 ### Hooks Configuration
 

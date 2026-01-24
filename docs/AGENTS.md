@@ -39,9 +39,9 @@ The supervisor monitors all other agents and nudges them toward progress. It:
 - Reports status when humans ask "what's everyone up to?"
 - Never directly merges or modifies PRs (that's merge-queue's job)
 
-**Key constraint**: The supervisor coordinates but doesn't execute. It communicates through `multiclaude agent send-message` rather than taking direct action on PRs.
+**Key constraint**: The supervisor coordinates but doesn't execute. It communicates through `multiclaude message send` rather than taking direct action on PRs.
 
-### 2. Merge-Queue (`internal/prompts/merge-queue.md`)
+### 2. Merge-Queue (`internal/templates/agent-templates/merge-queue.md`)
 
 **Role**: The ratchet mechanism - converts passing PRs into permanent progress
 **Worktree**: Main repository
@@ -55,7 +55,7 @@ This is the most complex agent with multiple responsibilities:
 | Check CI | `gh run list --branch main`, `gh pr checks <n>` |
 | Verify reviews | `gh pr view <n> --json reviews,reviewRequests` |
 | Merge PRs | `gh pr merge <n> --squash` |
-| Spawn fix workers | `multiclaude work "Fix CI for PR #N"` |
+| Spawn fix workers | `multiclaude worker create "Fix CI for PR #N"` |
 | Handle emergencies | Enter "emergency fix mode" when main is broken |
 
 **Critical behaviors:**
@@ -64,7 +64,7 @@ This is the most complex agent with multiple responsibilities:
 - Tracks PRs needing human input with `needs-human-input` label
 - Can close unsalvageable PRs but must preserve learnings in issues
 
-### 3. Worker (`internal/prompts/worker.md`)
+### 3. Worker (`internal/templates/agent-templates/worker.md`)
 
 **Role**: Execute specific tasks and create PRs
 **Worktree**: Isolated branch (`work/<worker-name>`)
@@ -100,7 +100,7 @@ The workspace is unique - it's the only agent that:
 - Can spawn workers on behalf of the user
 - Persists conversation history across sessions
 
-### 5. Review (`internal/prompts/review.md`)
+### 5. Review (`internal/templates/agent-templates/reviewer.md`)
 
 **Role**: Code review and quality gate
 **Worktree**: PR branch (ephemeral)
@@ -110,6 +110,17 @@ Review agents are spawned by merge-queue to evaluate PRs before merge. They:
 - Post blocking (`[BLOCKING]`) or non-blocking suggestions as PR comments
 - Report summary to merge-queue for merge decision
 - Default to non-blocking suggestions unless security/correctness issues
+
+### 6. PR Shepherd (`internal/templates/agent-templates/pr-shepherd.md`)
+
+**Role**: Monitors and manages PRs in fork mode
+**Worktree**: Main repository
+**Lifecycle**: Persistent (used when working with forks)
+
+The PR Shepherd is similar to the merge-queue but designed for fork workflows where you contribute to upstream repositories. It:
+- Monitors PRs created by workers
+- Tracks PR status on the upstream repository
+- Helps coordinate rebases and conflict resolution
 
 ## Agent Communication
 
@@ -132,11 +143,13 @@ pending → delivered → read → acked
 
 ```bash
 # From any agent:
-multiclaude agent send-message <target> "<message>"
-multiclaude agent send-message --all "<broadcast>"
-multiclaude agent list-messages
-multiclaude agent ack-message <id>
+multiclaude message send <target> "<message>"
+multiclaude message list
+multiclaude message read <id>
+multiclaude message ack <id>
 ```
+
+Note: The old `agent send-message`, `agent list-messages`, `agent read-message`, and `agent ack-message` commands are still available as aliases for backward compatibility.
 
 ### Implementation Details
 
@@ -153,7 +166,7 @@ Messages are JSON files in `~/.multiclaude/messages/<repo>/<agent>/<msg-id>.json
 }
 ```
 
-The daemon routes messages every 2 minutes via `SendKeysLiteralWithEnter()` - this atomically sends text + Enter to avoid race conditions (see `pkg/tmux/client.go:264`).
+The daemon routes messages every 2 minutes via `SendKeysLiteralWithEnter()` - this atomically sends text + Enter to avoid race conditions (see `pkg/tmux/client.go:319`).
 
 ## Agent Slash Commands
 
@@ -201,19 +214,77 @@ Default prompts are embedded at compile time via `//go:embed`:
 var defaultSupervisorPrompt string
 ```
 
-### Custom Prompts
+### Custom Prompts (Configurable Agents System)
 
-Repositories can override prompts by adding files to `.multiclaude/`:
+Repositories can customize agent behavior by creating markdown files in `.multiclaude/agents/`:
 
-| Agent Type | Custom File |
-|------------|-------------|
-| supervisor | `.multiclaude/SUPERVISOR.md` |
-| worker | `.multiclaude/WORKER.md` |
-| merge-queue | `.multiclaude/REVIEWER.md` |
-| workspace | `.multiclaude/WORKSPACE.md` |
-| review | `.multiclaude/REVIEW.md` |
+| Agent Type | Definition File |
+|------------|-----------------|
+| worker | `.multiclaude/agents/worker.md` |
+| merge-queue | `.multiclaude/agents/merge-queue.md` |
+| review | `.multiclaude/agents/review.md` |
 
-Custom prompts are appended to default prompts, not replaced.
+**Precedence order:**
+1. `<repo>/.multiclaude/agents/<agent>.md` (checked into repo, highest priority)
+2. `~/.multiclaude/repos/<repo>/agents/<agent>.md` (local overrides)
+3. Built-in templates (fallback)
+
+Note: Supervisor and workspace agents use embedded prompts only and cannot be customized via this system.
+
+**Deprecated:** The old system using `SUPERVISOR.md`, `WORKER.md`, `REVIEWER.md`, etc. directly in `.multiclaude/` is deprecated. Migrate your custom prompts to the new `.multiclaude/agents/` directory structure.
+
+### Managing Agent Definitions via CLI
+
+```bash
+# List agent definitions for the current repo
+multiclaude agents list
+
+# Reset definitions to built-in defaults
+multiclaude agents reset
+
+# Spawn a custom agent from a prompt file
+multiclaude agents spawn --name my-agent --class worker --prompt-file ./custom.md
+```
+
+### Example: Customizing Worker Behavior
+
+To customize how workers operate for your project:
+
+1. First, ensure the default templates are copied to your local definitions:
+   ```bash
+   multiclaude agents reset
+   ```
+
+2. Edit the worker definition:
+   ```bash
+   $EDITOR ~/.multiclaude/repos/my-repo/agents/worker.md
+   ```
+
+3. Add project-specific instructions at the end:
+   ```markdown
+   ## Project-Specific Guidelines
+
+   ### Commit Conventions
+   - Use conventional commits: feat:, fix:, docs:, refactor:, test:
+   - Reference issue numbers in commit messages
+
+   ### Code Style
+   - Follow the patterns in existing code
+   - Run `make lint` before creating PRs
+   - All new public functions need docstrings
+
+   ### Testing Requirements
+   - Add tests for all new functionality
+   - Ensure `make test` passes before marking complete
+   ```
+
+4. To share with your team, move the customization to the repo:
+   ```bash
+   mkdir -p .multiclaude/agents
+   cp ~/.multiclaude/repos/my-repo/agents/worker.md .multiclaude/agents/
+   git add .multiclaude/agents/worker.md
+   git commit -m "docs: Add worker agent conventions"
+   ```
 
 ### Prompt Assembly
 
@@ -228,7 +299,7 @@ CLI docs are auto-generated via `go generate ./pkg/config`.
 ### Spawn Flow (Worker Example)
 
 ```
-CLI: multiclaude work "task description"
+CLI: multiclaude worker create "task description"
          ↓
 1. Generate unique name (adjective-animal pattern)
 2. Create git worktree at ~/.multiclaude/wts/<repo>/<name>
@@ -355,15 +426,13 @@ go test ./test/ -run TestDaemonCrashRecovery
    const AgentTypeMyAgent AgentType = "my-agent"
    ```
 
-2. **Create the prompt** at `internal/prompts/my-agent.md`
+2. **Create the prompt template** at `internal/templates/agent-templates/my-agent.md`
+   - Note: Only supervisor and workspace prompts are embedded directly in `internal/prompts/`
+   - Other agent types (worker, merge-queue, review) use templates that can be customized
 
-3. **Embed the prompt** in `internal/prompts/prompts.go`:
-   ```go
-   //go:embed my-agent.md
-   var defaultMyAgentPrompt string
-   ```
+3. **Add the template** to `internal/templates/templates.go` for embedding
 
-4. **Add prompt loading** in `GetDefaultPrompt()` and `LoadCustomPrompt()`
+4. **Add prompt loading** in `GetDefaultPrompt()` if needed (for embedded prompts only)
 
 5. **Add wake message** in `daemon.go:wakeAgents()` if needed
 

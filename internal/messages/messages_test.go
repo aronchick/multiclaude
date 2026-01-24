@@ -373,3 +373,176 @@ func TestCleanupOrphaned(t *testing.T) {
 		}
 	}
 }
+
+func TestErrorHandling(t *testing.T) {
+	t.Run("Send fails with invalid permissions", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := NewManager(tmpDir)
+
+		repoName := "test-repo"
+		agentName := "worker1"
+
+		// Create agent directory first
+		agentDir := filepath.Join(tmpDir, repoName, agentName)
+		if err := os.MkdirAll(agentDir, 0755); err != nil {
+			t.Fatalf("Failed to create agent dir: %v", err)
+		}
+
+		// Make it read-only
+		if err := os.Chmod(agentDir, 0444); err != nil {
+			t.Fatalf("Failed to chmod: %v", err)
+		}
+		defer os.Chmod(agentDir, 0755) // Restore for cleanup
+
+		// Send should fail
+		_, err := m.Send(repoName, "supervisor", agentName, "Test")
+		if err == nil {
+			t.Error("Expected Send to fail with read-only directory")
+		}
+	})
+
+	t.Run("Get fails for non-existent message", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := NewManager(tmpDir)
+
+		_, err := m.Get("repo", "agent", "nonexistent-id")
+		if err == nil {
+			t.Error("Expected Get to fail for non-existent message")
+		}
+	})
+
+	t.Run("UpdateStatus fails for non-existent message", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := NewManager(tmpDir)
+
+		err := m.UpdateStatus("repo", "agent", "nonexistent-id", StatusRead)
+		if err == nil {
+			t.Error("Expected UpdateStatus to fail for non-existent message")
+		}
+	})
+
+	t.Run("List handles non-existent directory", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := NewManager(tmpDir)
+
+		messages, err := m.List("nonexistent-repo", "nonexistent-agent")
+		if err != nil {
+			t.Fatalf("List should not error for non-existent directory: %v", err)
+		}
+		if len(messages) != 0 {
+			t.Errorf("Expected empty list, got %d messages", len(messages))
+		}
+	})
+
+	t.Run("ListUnread handles non-existent directory", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := NewManager(tmpDir)
+
+		messages, err := m.ListUnread("nonexistent-repo", "nonexistent-agent")
+		if err != nil {
+			t.Fatalf("ListUnread should not error for non-existent directory: %v", err)
+		}
+		if len(messages) != 0 {
+			t.Errorf("Expected empty list, got %d messages", len(messages))
+		}
+	})
+
+	t.Run("CleanupOrphaned handles non-existent repo", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := NewManager(tmpDir)
+
+		count, err := m.CleanupOrphaned("nonexistent-repo", []string{"agent1"})
+		if err != nil {
+			t.Fatalf("CleanupOrphaned should not error for non-existent repo: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("Expected 0 cleaned up, got %d", count)
+		}
+	})
+
+	t.Run("read handles corrupted JSON", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := NewManager(tmpDir)
+
+		repoName := "test-repo"
+		agentName := "worker1"
+
+		// Create agent directory
+		agentDir := filepath.Join(tmpDir, repoName, agentName)
+		if err := os.MkdirAll(agentDir, 0755); err != nil {
+			t.Fatalf("Failed to create agent dir: %v", err)
+		}
+
+		// Write invalid JSON
+		badJSON := filepath.Join(agentDir, "bad.json")
+		if err := os.WriteFile(badJSON, []byte("{invalid json"), 0644); err != nil {
+			t.Fatalf("Failed to write bad JSON: %v", err)
+		}
+
+		// List should skip the corrupted file
+		messages, err := m.List(repoName, agentName)
+		if err != nil {
+			t.Fatalf("List should handle corrupted JSON gracefully: %v", err)
+		}
+		// Should not include the corrupted message
+		if len(messages) != 0 {
+			t.Errorf("Expected 0 valid messages, got %d", len(messages))
+		}
+	})
+
+	t.Run("Delete is idempotent", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := NewManager(tmpDir)
+
+		repoName := "test-repo"
+		agentName := "worker1"
+
+		msg, err := m.Send(repoName, "supervisor", agentName, "Test")
+		if err != nil {
+			t.Fatalf("Send failed: %v", err)
+		}
+
+		// Delete once
+		if err := m.Delete(repoName, agentName, msg.ID); err != nil {
+			t.Fatalf("First delete failed: %v", err)
+		}
+
+		// Delete again - should not error
+		if err := m.Delete(repoName, agentName, msg.ID); err != nil {
+			t.Errorf("Second delete should not error: %v", err)
+		}
+	})
+
+	t.Run("CleanupOrphaned ignores files", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		m := NewManager(tmpDir)
+
+		repoName := "test-repo"
+
+		// Create a file in the repo directory (not a directory)
+		repoDir := filepath.Join(tmpDir, repoName)
+		if err := os.MkdirAll(repoDir, 0755); err != nil {
+			t.Fatalf("Failed to create repo dir: %v", err)
+		}
+
+		filePath := filepath.Join(repoDir, "somefile.txt")
+		if err := os.WriteFile(filePath, []byte("content"), 0644); err != nil {
+			t.Fatalf("Failed to create file: %v", err)
+		}
+
+		// CleanupOrphaned should not try to remove the file
+		count, err := m.CleanupOrphaned(repoName, []string{})
+		if err != nil {
+			t.Fatalf("CleanupOrphaned failed: %v", err)
+		}
+
+		// File should still exist
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			t.Error("File was removed by CleanupOrphaned")
+		}
+
+		if count != 0 {
+			t.Errorf("Expected 0 cleaned up, got %d", count)
+		}
+	})
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -982,6 +983,35 @@ func TestTrackModeConstants(t *testing.T) {
 	}
 }
 
+func TestParseTrackMode(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    TrackMode
+		wantErr bool
+	}{
+		{"all", TrackModeAll, false},
+		{"author", TrackModeAuthor, false},
+		{"assigned", TrackModeAssigned, false},
+		{"invalid", "", true},
+		{"ALL", "", true},     // case-sensitive
+		{"", "", true},        // empty string
+		{"  all  ", "", true}, // no whitespace trimming
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := ParseTrackMode(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseTrackMode(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("ParseTrackMode(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCurrentRepo(t *testing.T) {
 	tmpDir := t.TempDir()
 	statePath := filepath.Join(tmpDir, "state.json")
@@ -1283,5 +1313,896 @@ func TestTaskHistoryPersistence(t *testing.T) {
 	}
 	if history[0].Status != TaskStatusMerged {
 		t.Errorf("Loaded entry status = %q, want 'merged'", history[0].Status)
+	}
+}
+
+func TestConcurrentSaves(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add initial repo
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Run concurrent saves
+	const numGoroutines = 10
+	const opsPerGoroutine = 20
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, numGoroutines*opsPerGoroutine)
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < opsPerGoroutine; j++ {
+				agentName := fmt.Sprintf("agent-%d-%d", id, j)
+				agent := Agent{
+					Type:       AgentTypeWorker,
+					TmuxWindow: agentName,
+					SessionID:  fmt.Sprintf("session-%d-%d", id, j),
+					PID:        12345 + id*100 + j,
+					CreatedAt:  time.Now(),
+				}
+				if err := s.AddAgent("test-repo", agentName, agent); err != nil {
+					// Agent might already exist from a race - that's OK
+					continue
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	// Collect any errors
+	for err := range errChan {
+		t.Errorf("Concurrent operation failed: %v", err)
+	}
+
+	// Verify state is valid by reloading
+	loaded, err := Load(statePath)
+	if err != nil {
+		t.Fatalf("Load() after concurrent saves failed: %v", err)
+	}
+
+	// Should have the repo
+	_, exists := loaded.GetRepo("test-repo")
+	if !exists {
+		t.Error("Repository not found after concurrent saves")
+	}
+}
+
+func TestGetAllReposCopiesTaskHistory(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add a repo with task history
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Add task history
+	entry := TaskHistoryEntry{
+		Name:      "worker-1",
+		Task:      "Test task",
+		Branch:    "work/worker-1",
+		Status:    TaskStatusMerged,
+		CreatedAt: time.Now(),
+	}
+	if err := s.AddTaskHistory("test-repo", entry); err != nil {
+		t.Fatalf("AddTaskHistory() failed: %v", err)
+	}
+
+	// Get all repos
+	repos := s.GetAllRepos()
+
+	// Verify task history was copied
+	copiedRepo := repos["test-repo"]
+	if copiedRepo.TaskHistory == nil {
+		t.Fatal("GetAllRepos() did not copy TaskHistory (nil)")
+	}
+	if len(copiedRepo.TaskHistory) != 1 {
+		t.Fatalf("GetAllRepos() TaskHistory length = %d, want 1", len(copiedRepo.TaskHistory))
+	}
+	if copiedRepo.TaskHistory[0].Name != "worker-1" {
+		t.Errorf("Copied TaskHistory entry name = %q, want 'worker-1'", copiedRepo.TaskHistory[0].Name)
+	}
+
+	// Modify the copy and verify original is unchanged
+	copiedRepo.TaskHistory[0].Name = "modified"
+
+	originalHistory, _ := s.GetTaskHistory("test-repo", 10)
+	if originalHistory[0].Name == "modified" {
+		t.Error("GetAllRepos() did not deep copy TaskHistory - modifying snapshot affected original")
+	}
+}
+
+func TestSaveCleansUpTempFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add data and save multiple times
+	for i := 0; i < 5; i++ {
+		repo := &Repository{
+			GithubURL:   fmt.Sprintf("https://github.com/test/repo%d", i),
+			TmuxSession: fmt.Sprintf("mc-test%d", i),
+			Agents:      make(map[string]Agent),
+		}
+		if err := s.AddRepo(fmt.Sprintf("repo%d", i), repo); err != nil {
+			t.Fatalf("AddRepo() failed: %v", err)
+		}
+	}
+
+	// Check that no .tmp files are left behind
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".tmp" {
+			t.Errorf("Temp file not cleaned up: %s", entry.Name())
+		}
+	}
+}
+
+func TestUpdateAgentPID(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Create a repo
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Add an agent
+	agent := Agent{
+		Type:       AgentTypeSupervisor,
+		TmuxWindow: "supervisor",
+		SessionID:  "session-1",
+		PID:        12345,
+		CreatedAt:  time.Now(),
+	}
+	if err := s.AddAgent("test-repo", "supervisor", agent); err != nil {
+		t.Fatalf("AddAgent() failed: %v", err)
+	}
+
+	// Update the PID
+	if err := s.UpdateAgentPID("test-repo", "supervisor", 67890); err != nil {
+		t.Fatalf("UpdateAgentPID() failed: %v", err)
+	}
+
+	// Verify the PID was updated
+	updated, exists := s.GetAgent("test-repo", "supervisor")
+	if !exists {
+		t.Fatal("Agent not found after update")
+	}
+	if updated.PID != 67890 {
+		t.Errorf("PID = %d, want 67890", updated.PID)
+	}
+
+	// Test error cases
+	if err := s.UpdateAgentPID("nonexistent", "supervisor", 11111); err == nil {
+		t.Error("UpdateAgentPID should fail for nonexistent repo")
+	}
+	if err := s.UpdateAgentPID("test-repo", "nonexistent", 11111); err == nil {
+		t.Error("UpdateAgentPID should fail for nonexistent agent")
+	}
+}
+
+func TestUpdateTaskHistorySummary(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Create a repo
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Add a task history entry
+	entry := TaskHistoryEntry{
+		Name:      "worker-1",
+		Task:      "Test task",
+		Branch:    "work/worker-1",
+		Status:    TaskStatusOpen,
+		CreatedAt: time.Now(),
+	}
+	if err := s.AddTaskHistory("test-repo", entry); err != nil {
+		t.Fatalf("AddTaskHistory() failed: %v", err)
+	}
+
+	// Update with summary
+	if err := s.UpdateTaskHistorySummary("test-repo", "worker-1", "Completed the task successfully", ""); err != nil {
+		t.Fatalf("UpdateTaskHistorySummary() failed: %v", err)
+	}
+
+	// Verify the summary was updated
+	history, _ := s.GetTaskHistory("test-repo", 10)
+	if history[0].Summary != "Completed the task successfully" {
+		t.Errorf("Summary = %q, want 'Completed the task successfully'", history[0].Summary)
+	}
+
+	// Update with failure reason
+	if err := s.UpdateTaskHistorySummary("test-repo", "worker-1", "", "Out of memory"); err != nil {
+		t.Fatalf("UpdateTaskHistorySummary() failed: %v", err)
+	}
+
+	// Verify the failure reason was updated and status changed
+	history, _ = s.GetTaskHistory("test-repo", 10)
+	if history[0].FailureReason != "Out of memory" {
+		t.Errorf("FailureReason = %q, want 'Out of memory'", history[0].FailureReason)
+	}
+	if history[0].Status != TaskStatusFailed {
+		t.Errorf("Status = %q, want 'failed'", history[0].Status)
+	}
+
+	// Test error case
+	if err := s.UpdateTaskHistorySummary("test-repo", "nonexistent", "summary", ""); err == nil {
+		t.Error("UpdateTaskHistorySummary should fail for nonexistent task")
+	}
+}
+
+func TestAgentTypeIsPersistent(t *testing.T) {
+	tests := []struct {
+		agentType  AgentType
+		persistent bool
+	}{
+		// Persistent agents should return true
+		{AgentTypeSupervisor, true},
+		{AgentTypeMergeQueue, true},
+		{AgentTypeWorkspace, true},
+		{AgentTypeGenericPersistent, true},
+		// Transient agents should return false
+		{AgentTypeWorker, false},
+		{AgentTypeReview, false},
+		// Unknown types should return false (safe default)
+		{AgentType("unknown"), false},
+		{AgentType(""), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.agentType), func(t *testing.T) {
+			got := tt.agentType.IsPersistent()
+			if got != tt.persistent {
+				t.Errorf("AgentType(%q).IsPersistent() = %v, want %v", tt.agentType, got, tt.persistent)
+			}
+		})
+	}
+}
+
+func TestDefaultPRShepherdConfig(t *testing.T) {
+	config := DefaultPRShepherdConfig()
+
+	if !config.Enabled {
+		t.Error("Default PR shepherd config should have Enabled = true")
+	}
+
+	if config.TrackMode != TrackModeAuthor {
+		t.Errorf("Default PR shepherd config TrackMode = %q, want %q", config.TrackMode, TrackModeAuthor)
+	}
+}
+
+func TestGetPRShepherdConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Test non-existent repo
+	_, err := s.GetPRShepherdConfig("nonexistent")
+	if err == nil {
+		t.Error("GetPRShepherdConfig() should fail for nonexistent repo")
+	}
+
+	// Add repo without explicit PR shepherd config (should get defaults)
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Get config - should return defaults for empty config
+	config, err := s.GetPRShepherdConfig("test-repo")
+	if err != nil {
+		t.Fatalf("GetPRShepherdConfig() failed: %v", err)
+	}
+
+	if !config.Enabled {
+		t.Error("Default PR shepherd config should have Enabled = true")
+	}
+
+	if config.TrackMode != TrackModeAuthor {
+		t.Errorf("Default PR shepherd config TrackMode = %q, want %q", config.TrackMode, TrackModeAuthor)
+	}
+}
+
+func TestGetPRShepherdConfigWithExplicitConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add repo with explicit PR shepherd config
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+		PRShepherdConfig: PRShepherdConfig{
+			Enabled:   false,
+			TrackMode: TrackModeAssigned,
+		},
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Get config - should return the explicit config
+	config, err := s.GetPRShepherdConfig("test-repo")
+	if err != nil {
+		t.Fatalf("GetPRShepherdConfig() failed: %v", err)
+	}
+
+	if config.Enabled {
+		t.Error("PR shepherd config should have Enabled = false")
+	}
+
+	if config.TrackMode != TrackModeAssigned {
+		t.Errorf("PR shepherd config TrackMode = %q, want %q", config.TrackMode, TrackModeAssigned)
+	}
+}
+
+func TestUpdatePRShepherdConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Test non-existent repo
+	err := s.UpdatePRShepherdConfig("nonexistent", PRShepherdConfig{})
+	if err == nil {
+		t.Error("UpdatePRShepherdConfig() should fail for nonexistent repo")
+	}
+
+	// Add repo
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Update config
+	newConfig := PRShepherdConfig{
+		Enabled:   false,
+		TrackMode: TrackModeAll,
+	}
+
+	if err := s.UpdatePRShepherdConfig("test-repo", newConfig); err != nil {
+		t.Fatalf("UpdatePRShepherdConfig() failed: %v", err)
+	}
+
+	// Verify update
+	updatedConfig, err := s.GetPRShepherdConfig("test-repo")
+	if err != nil {
+		t.Fatalf("GetPRShepherdConfig() failed: %v", err)
+	}
+
+	if updatedConfig.Enabled != false {
+		t.Error("Config.Enabled not updated correctly")
+	}
+
+	if updatedConfig.TrackMode != TrackModeAll {
+		t.Errorf("Config.TrackMode = %q, want %q", updatedConfig.TrackMode, TrackModeAll)
+	}
+
+	// Verify persistence - reload state
+	loaded, err := Load(statePath)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	loadedConfig, err := loaded.GetPRShepherdConfig("test-repo")
+	if err != nil {
+		t.Fatalf("GetPRShepherdConfig() after reload failed: %v", err)
+	}
+
+	if loadedConfig.TrackMode != TrackModeAll {
+		t.Error("Config not persisted correctly after update")
+	}
+}
+
+func TestGetForkConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Test non-existent repo
+	_, err := s.GetForkConfig("nonexistent")
+	if err == nil {
+		t.Error("GetForkConfig() should fail for nonexistent repo")
+	}
+
+	// Add repo without fork config
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Get config - should return empty ForkConfig
+	config, err := s.GetForkConfig("test-repo")
+	if err != nil {
+		t.Fatalf("GetForkConfig() failed: %v", err)
+	}
+
+	if config.IsFork {
+		t.Error("Default fork config should have IsFork = false")
+	}
+	if config.UpstreamURL != "" {
+		t.Errorf("Default fork config UpstreamURL = %q, want empty string", config.UpstreamURL)
+	}
+}
+
+func TestGetForkConfigWithData(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add repo with fork config
+	repo := &Repository{
+		GithubURL:   "https://github.com/fork-owner/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+		ForkConfig: ForkConfig{
+			IsFork:        true,
+			UpstreamURL:   "https://github.com/upstream-owner/repo",
+			UpstreamOwner: "upstream-owner",
+			UpstreamRepo:  "repo",
+		},
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	config, err := s.GetForkConfig("test-repo")
+	if err != nil {
+		t.Fatalf("GetForkConfig() failed: %v", err)
+	}
+
+	if !config.IsFork {
+		t.Error("Fork config should have IsFork = true")
+	}
+	if config.UpstreamURL != "https://github.com/upstream-owner/repo" {
+		t.Errorf("Fork config UpstreamURL = %q, want 'https://github.com/upstream-owner/repo'", config.UpstreamURL)
+	}
+	if config.UpstreamOwner != "upstream-owner" {
+		t.Errorf("Fork config UpstreamOwner = %q, want 'upstream-owner'", config.UpstreamOwner)
+	}
+	if config.UpstreamRepo != "repo" {
+		t.Errorf("Fork config UpstreamRepo = %q, want 'repo'", config.UpstreamRepo)
+	}
+}
+
+func TestUpdateForkConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Test non-existent repo
+	err := s.UpdateForkConfig("nonexistent", ForkConfig{})
+	if err == nil {
+		t.Error("UpdateForkConfig() should fail for nonexistent repo")
+	}
+
+	// Add repo
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Update config
+	newConfig := ForkConfig{
+		IsFork:        true,
+		UpstreamURL:   "https://github.com/original/repo",
+		UpstreamOwner: "original",
+		UpstreamRepo:  "repo",
+		ForceForkMode: false,
+	}
+
+	if err := s.UpdateForkConfig("test-repo", newConfig); err != nil {
+		t.Fatalf("UpdateForkConfig() failed: %v", err)
+	}
+
+	// Verify update
+	updatedConfig, err := s.GetForkConfig("test-repo")
+	if err != nil {
+		t.Fatalf("GetForkConfig() failed: %v", err)
+	}
+
+	if !updatedConfig.IsFork {
+		t.Error("Config.IsFork not updated correctly")
+	}
+
+	if updatedConfig.UpstreamURL != "https://github.com/original/repo" {
+		t.Errorf("Config.UpstreamURL = %q, want 'https://github.com/original/repo'", updatedConfig.UpstreamURL)
+	}
+
+	// Verify persistence - reload state
+	loaded, err := Load(statePath)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	loadedConfig, err := loaded.GetForkConfig("test-repo")
+	if err != nil {
+		t.Fatalf("GetForkConfig() after reload failed: %v", err)
+	}
+
+	if !loadedConfig.IsFork {
+		t.Error("Config.IsFork not persisted correctly after update")
+	}
+}
+
+func TestIsForkMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Test non-existent repo - should return false
+	if s.IsForkMode("nonexistent") {
+		t.Error("IsForkMode() should return false for nonexistent repo")
+	}
+
+	// Add repo without fork config - should return false
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	if s.IsForkMode("test-repo") {
+		t.Error("IsForkMode() should return false for repo without fork config")
+	}
+}
+
+func TestIsForkModeWithFork(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add repo that is a fork
+	repo := &Repository{
+		GithubURL:   "https://github.com/fork-owner/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+		ForkConfig: ForkConfig{
+			IsFork: true,
+		},
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	if !s.IsForkMode("test-repo") {
+		t.Error("IsForkMode() should return true for fork repo")
+	}
+}
+
+func TestIsForkModeWithForceForkMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add repo that is not a fork but has ForceForkMode enabled
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+		ForkConfig: ForkConfig{
+			IsFork:        false,
+			ForceForkMode: true,
+		},
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	if !s.IsForkMode("test-repo") {
+		t.Error("IsForkMode() should return true when ForceForkMode is enabled")
+	}
+}
+
+func TestForkConfigPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	// Create state with fork config
+	s := New(statePath)
+	repo := &Repository{
+		GithubURL:   "https://github.com/fork-owner/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+		ForkConfig: ForkConfig{
+			IsFork:        true,
+			UpstreamURL:   "https://github.com/original/repo",
+			UpstreamOwner: "original",
+			UpstreamRepo:  "repo",
+			ForceForkMode: false,
+		},
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Load state from disk
+	loaded, err := Load(statePath)
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	// Verify fork config persisted
+	config, err := loaded.GetForkConfig("test-repo")
+	if err != nil {
+		t.Fatalf("GetForkConfig() failed: %v", err)
+	}
+
+	if !config.IsFork {
+		t.Error("ForkConfig.IsFork not persisted correctly")
+	}
+	if config.UpstreamURL != "https://github.com/original/repo" {
+		t.Errorf("ForkConfig.UpstreamURL = %q, want 'https://github.com/original/repo'", config.UpstreamURL)
+	}
+	if config.UpstreamOwner != "original" {
+		t.Errorf("ForkConfig.UpstreamOwner = %q, want 'original'", config.UpstreamOwner)
+	}
+	if config.UpstreamRepo != "repo" {
+		t.Errorf("ForkConfig.UpstreamRepo = %q, want 'repo'", config.UpstreamRepo)
+	}
+
+	// Verify IsForkMode works after reload
+	if !loaded.IsForkMode("test-repo") {
+		t.Error("IsForkMode() should return true after reload")
+	}
+}
+
+func TestGetAllReposCopiesForkConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add repo with fork config
+	repo := &Repository{
+		GithubURL:   "https://github.com/fork-owner/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+		ForkConfig: ForkConfig{
+			IsFork:        true,
+			UpstreamURL:   "https://github.com/original/repo",
+			UpstreamOwner: "original",
+			UpstreamRepo:  "repo",
+		},
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Get all repos
+	repos := s.GetAllRepos()
+
+	// Verify fork config was copied
+	copiedRepo := repos["test-repo"]
+	if !copiedRepo.ForkConfig.IsFork {
+		t.Error("GetAllRepos() did not copy ForkConfig.IsFork")
+	}
+	if copiedRepo.ForkConfig.UpstreamOwner != "original" {
+		t.Errorf("GetAllRepos() ForkConfig.UpstreamOwner = %q, want 'original'", copiedRepo.ForkConfig.UpstreamOwner)
+	}
+
+	// Modify the copy and verify original is unchanged
+	copiedRepo.ForkConfig.UpstreamOwner = "modified"
+
+	originalConfig, _ := s.GetForkConfig("test-repo")
+	if originalConfig.UpstreamOwner == "modified" {
+		t.Error("GetAllRepos() did not deep copy ForkConfig - modifying snapshot affected original")
+	}
+}
+
+func TestGetAllReposCopiesPRShepherdConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add repo with PR shepherd config
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+		PRShepherdConfig: PRShepherdConfig{
+			Enabled:   false,
+			TrackMode: TrackModeAssigned,
+		},
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Get all repos
+	repos := s.GetAllRepos()
+
+	// Verify PR shepherd config was copied
+	copiedRepo := repos["test-repo"]
+	if copiedRepo.PRShepherdConfig.Enabled {
+		t.Error("GetAllRepos() did not copy PRShepherdConfig.Enabled correctly")
+	}
+	if copiedRepo.PRShepherdConfig.TrackMode != TrackModeAssigned {
+		t.Errorf("GetAllRepos() PRShepherdConfig.TrackMode = %q, want 'assigned'", copiedRepo.PRShepherdConfig.TrackMode)
+	}
+
+	// Modify the copy and verify original is unchanged
+	copiedRepo.PRShepherdConfig.TrackMode = TrackModeAll
+
+	originalConfig, _ := s.GetPRShepherdConfig("test-repo")
+	if originalConfig.TrackMode == TrackModeAll {
+		t.Error("GetAllRepos() did not deep copy PRShepherdConfig - modifying snapshot affected original")
+	}
+}
+
+func TestTaskHistoryNonExistentRepo(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Test AddTaskHistory on non-existent repo
+	entry := TaskHistoryEntry{
+		Name:      "worker-1",
+		Task:      "Test task",
+		CreatedAt: time.Now(),
+	}
+	err := s.AddTaskHistory("nonexistent", entry)
+	if err == nil {
+		t.Error("AddTaskHistory() should fail for nonexistent repo")
+	}
+
+	// Test GetTaskHistory on non-existent repo
+	_, err = s.GetTaskHistory("nonexistent", 10)
+	if err == nil {
+		t.Error("GetTaskHistory() should fail for nonexistent repo")
+	}
+
+	// Test UpdateTaskHistoryStatus on non-existent repo
+	err = s.UpdateTaskHistoryStatus("nonexistent", "worker-1", TaskStatusMerged, "", 0)
+	if err == nil {
+		t.Error("UpdateTaskHistoryStatus() should fail for nonexistent repo")
+	}
+
+	// Test UpdateTaskHistorySummary on non-existent repo
+	err = s.UpdateTaskHistorySummary("nonexistent", "worker-1", "summary", "")
+	if err == nil {
+		t.Error("UpdateTaskHistorySummary() should fail for nonexistent repo")
+	}
+}
+
+func TestGetTaskHistoryEmptyHistory(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add repo without task history
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Get history - should return empty slice, not nil
+	history, err := s.GetTaskHistory("test-repo", 10)
+	if err != nil {
+		t.Fatalf("GetTaskHistory() failed: %v", err)
+	}
+
+	if history == nil {
+		t.Error("GetTaskHistory() should return empty slice, not nil")
+	}
+	if len(history) != 0 {
+		t.Errorf("GetTaskHistory() returned %d entries, want 0", len(history))
+	}
+}
+
+func TestGetTaskHistoryNoLimit(t *testing.T) {
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "state.json")
+
+	s := New(statePath)
+
+	// Add repo
+	repo := &Repository{
+		GithubURL:   "https://github.com/test/repo",
+		TmuxSession: "mc-test",
+		Agents:      make(map[string]Agent),
+	}
+	if err := s.AddRepo("test-repo", repo); err != nil {
+		t.Fatalf("AddRepo() failed: %v", err)
+	}
+
+	// Add 5 task history entries
+	for i := 0; i < 5; i++ {
+		entry := TaskHistoryEntry{
+			Name:      fmt.Sprintf("worker-%d", i),
+			Task:      fmt.Sprintf("Task %d", i),
+			CreatedAt: time.Now().Add(time.Duration(i) * time.Hour),
+		}
+		if err := s.AddTaskHistory("test-repo", entry); err != nil {
+			t.Fatalf("AddTaskHistory() failed: %v", err)
+		}
+	}
+
+	// Get history with no limit (0)
+	history, err := s.GetTaskHistory("test-repo", 0)
+	if err != nil {
+		t.Fatalf("GetTaskHistory() failed: %v", err)
+	}
+
+	if len(history) != 5 {
+		t.Errorf("GetTaskHistory() with limit=0 returned %d entries, want 5", len(history))
 	}
 }

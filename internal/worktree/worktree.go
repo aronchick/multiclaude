@@ -18,24 +18,46 @@ func NewManager(repoPath string) *Manager {
 	return &Manager{repoPath: repoPath}
 }
 
+// runGit runs a git command in the repository directory and returns output.
+// If the command fails, the error includes the command output for debugging.
+func (m *Manager) runGit(args ...string) ([]byte, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = m.repoPath
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return output, fmt.Errorf("git %s: %w\nOutput: %s", args[0], err, output)
+	}
+	return output, nil
+}
+
+// resolvePathWithSymlinks resolves a path to its absolute form and evaluates symlinks.
+// This is important on macOS where /var is a symlink to /private/var.
+// If symlink resolution fails (e.g., path doesn't exist), returns the absolute path.
+func resolvePathWithSymlinks(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+
+	evalPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		// Path might not exist yet or symlink resolution failed, use absPath
+		return absPath, nil
+	}
+
+	return evalPath, nil
+}
+
 // Create creates a new git worktree
 func (m *Manager) Create(path, branch string) error {
-	cmd := exec.Command("git", "worktree", "add", path, branch)
-	cmd.Dir = m.repoPath
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create worktree: %w\nOutput: %s", err, output)
-	}
-	return nil
+	_, err := m.runGit("worktree", "add", path, branch)
+	return err
 }
 
 // CreateNewBranch creates a new worktree with a new branch
 func (m *Manager) CreateNewBranch(path, newBranch, startPoint string) error {
-	cmd := exec.Command("git", "worktree", "add", "-b", newBranch, path, startPoint)
-	cmd.Dir = m.repoPath
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create worktree with new branch: %w\nOutput: %s", err, output)
-	}
-	return nil
+	_, err := m.runGit("worktree", "add", "-b", newBranch, path, startPoint)
+	return err
 }
 
 // Remove removes a git worktree
@@ -44,13 +66,8 @@ func (m *Manager) Remove(path string, force bool) error {
 	if force {
 		args = append(args, "--force")
 	}
-
-	cmd := exec.Command("git", args...)
-	cmd.Dir = m.repoPath
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to remove worktree: %w\nOutput: %s", err, output)
-	}
-	return nil
+	_, err := m.runGit(args...)
+	return err
 }
 
 // List returns a list of all worktrees
@@ -72,25 +89,15 @@ func (m *Manager) Exists(path string) (bool, error) {
 		return false, err
 	}
 
-	absPath, err := filepath.Abs(path)
+	evalPath, err := resolvePathWithSymlinks(path)
 	if err != nil {
 		return false, err
 	}
-	// Resolve symlinks for accurate comparison (important on macOS)
-	evalPath, err := filepath.EvalSymlinks(absPath)
-	if err != nil {
-		// Path might not exist yet, use absPath
-		evalPath = absPath
-	}
 
 	for _, wt := range worktrees {
-		wtAbs, err := filepath.Abs(wt.Path)
+		wtEval, err := resolvePathWithSymlinks(wt.Path)
 		if err != nil {
 			continue
-		}
-		wtEval, err := filepath.EvalSymlinks(wtAbs)
-		if err != nil {
-			wtEval = wtAbs
 		}
 		if wtEval == evalPath {
 			return true, nil
@@ -102,12 +109,8 @@ func (m *Manager) Exists(path string) (bool, error) {
 
 // Prune removes worktree information for missing paths
 func (m *Manager) Prune() error {
-	cmd := exec.Command("git", "worktree", "prune")
-	cmd.Dir = m.repoPath
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to prune worktrees: %w\nOutput: %s", err, output)
-	}
-	return nil
+	_, err := m.runGit("worktree", "prune")
+	return err
 }
 
 // HasUncommittedChanges checks if a worktree has uncommitted changes
@@ -124,11 +127,19 @@ func HasUncommittedChanges(path string) (bool, error) {
 
 // HasUnpushedCommits checks if a worktree has unpushed commits
 func HasUnpushedCommits(path string) (bool, error) {
-	// First check if there's a tracking branch
+	// First verify this is a valid git repository
+	verifyCmd := exec.Command("git", "rev-parse", "--git-dir")
+	verifyCmd.Dir = path
+	if err := verifyCmd.Run(); err != nil {
+		return false, fmt.Errorf("not a git repository: %w", err)
+	}
+
+	// Check if there's a tracking branch
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	cmd.Dir = path
 	if err := cmd.Run(); err != nil {
 		// No tracking branch, so no unpushed commits
+		// This is a valid state (branch has no upstream configured)
 		return false, nil
 	}
 
@@ -219,22 +230,14 @@ func (m *Manager) BranchExists(branchName string) (bool, error) {
 
 // RenameBranch renames a branch from oldName to newName
 func (m *Manager) RenameBranch(oldName, newName string) error {
-	cmd := exec.Command("git", "branch", "-m", oldName, newName)
-	cmd.Dir = m.repoPath
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to rename branch: %w\nOutput: %s", err, output)
-	}
-	return nil
+	_, err := m.runGit("branch", "-m", oldName, newName)
+	return err
 }
 
 // DeleteBranch force deletes a branch (git branch -D)
 func (m *Manager) DeleteBranch(branchName string) error {
-	cmd := exec.Command("git", "branch", "-D", branchName)
-	cmd.Dir = m.repoPath
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to delete branch: %w\nOutput: %s", err, output)
-	}
-	return nil
+	_, err := m.runGit("branch", "-D", branchName)
+	return err
 }
 
 // ListBranchesWithPrefix lists all branches that start with the given prefix
@@ -416,12 +419,8 @@ func (m *Manager) GetDefaultBranch(remote string) (string, error) {
 
 // FetchRemote fetches updates from a remote
 func (m *Manager) FetchRemote(remote string) error {
-	cmd := exec.Command("git", "fetch", remote)
-	cmd.Dir = m.repoPath
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to fetch from %s: %w\nOutput: %s", remote, err, output)
-	}
-	return nil
+	_, err := m.runGit("fetch", remote)
+	return err
 }
 
 // FindMergedUpstreamBranches finds local branches that have been merged into the upstream default branch.
@@ -478,12 +477,8 @@ func (m *Manager) FindMergedUpstreamBranches(branchPrefix string) ([]string, err
 
 // DeleteRemoteBranch deletes a branch from a remote
 func (m *Manager) DeleteRemoteBranch(remote, branchName string) error {
-	cmd := exec.Command("git", "push", remote, "--delete", branchName)
-	cmd.Dir = m.repoPath
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to delete remote branch: %w\nOutput: %s", err, output)
-	}
-	return nil
+	_, err := m.runGit("push", remote, "--delete", branchName)
+	return err
 }
 
 // CleanupMergedBranches finds and deletes local branches that have been merged upstream.
@@ -537,8 +532,29 @@ func (m *Manager) CleanupMergedBranches(branchPrefix string, deleteRemote bool) 
 	return deleted, nil
 }
 
-// CleanupOrphaned removes worktree directories that exist on disk but not in git
+// CleanupOrphanedResult contains the result of a cleanup operation
+type CleanupOrphanedResult struct {
+	Removed []string          // Successfully removed directories
+	Errors  map[string]string // Directories that failed to remove with error messages
+}
+
+// CleanupOrphaned removes worktree directories that exist on disk but not in git.
+// Returns a result containing both successfully removed paths and any errors encountered.
 func CleanupOrphaned(wtRootDir string, manager *Manager) ([]string, error) {
+	result, err := CleanupOrphanedWithDetails(wtRootDir, manager)
+	if err != nil {
+		return nil, err
+	}
+	return result.Removed, nil
+}
+
+// CleanupOrphanedWithDetails removes worktree directories that exist on disk but not in git.
+// Unlike CleanupOrphaned, this returns detailed results including any removal errors.
+func CleanupOrphanedWithDetails(wtRootDir string, manager *Manager) (*CleanupOrphanedResult, error) {
+	result := &CleanupOrphanedResult{
+		Errors: make(map[string]string),
+	}
+
 	// Get all worktrees from git
 	gitWorktrees, err := manager.List()
 	if err != nil {
@@ -547,24 +563,18 @@ func CleanupOrphaned(wtRootDir string, manager *Manager) ([]string, error) {
 
 	gitPaths := make(map[string]bool)
 	for _, wt := range gitWorktrees {
-		absPath, err := filepath.Abs(wt.Path)
+		evalPath, err := resolvePathWithSymlinks(wt.Path)
 		if err != nil {
 			continue
-		}
-		// Resolve symlinks for accurate comparison (important on macOS)
-		evalPath, err := filepath.EvalSymlinks(absPath)
-		if err != nil {
-			evalPath = absPath
 		}
 		gitPaths[evalPath] = true
 	}
 
 	// Find directories in wtRootDir that aren't in git worktrees
-	var removed []string
 	entries, err := os.ReadDir(wtRootDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return removed, nil
+			return result, nil
 		}
 		return nil, err
 	}
@@ -575,39 +585,36 @@ func CleanupOrphaned(wtRootDir string, manager *Manager) ([]string, error) {
 		}
 
 		path := filepath.Join(wtRootDir, entry.Name())
-		absPath, err := filepath.Abs(path)
+		evalPath, err := resolvePathWithSymlinks(path)
 		if err != nil {
 			continue
-		}
-		// Resolve symlinks for accurate comparison (important on macOS)
-		evalPath, err := filepath.EvalSymlinks(absPath)
-		if err != nil {
-			evalPath = absPath
 		}
 
 		if !gitPaths[evalPath] {
 			// This is an orphaned directory
-			if err := os.RemoveAll(path); err == nil {
-				removed = append(removed, path)
+			if err := os.RemoveAll(path); err != nil {
+				result.Errors[path] = err.Error()
+			} else {
+				result.Removed = append(result.Removed, path)
 			}
 		}
 	}
 
-	return removed, nil
+	return result, nil
 }
 
 // WorktreeState represents the current state of a worktree
 type WorktreeState struct {
-	Path            string
-	Branch          string
-	IsDetachedHEAD  bool
-	IsMidRebase     bool
-	IsMidMerge      bool
-	HasUncommitted  bool
-	CommitsBehind   int  // Number of commits behind remote main
-	CommitsAhead    int  // Number of commits ahead of remote main
-	CanRefresh      bool // True if worktree is in a state that can be safely refreshed
-	RefreshReason   string
+	Path           string
+	Branch         string
+	IsDetachedHEAD bool
+	IsMidRebase    bool
+	IsMidMerge     bool
+	HasUncommitted bool
+	CommitsBehind  int  // Number of commits behind remote main
+	CommitsAhead   int  // Number of commits ahead of remote main
+	CanRefresh     bool // True if worktree is in a state that can be safely refreshed
+	RefreshReason  string
 }
 
 // GetWorktreeState checks the current state of a worktree and whether it can be safely refreshed
@@ -717,16 +724,16 @@ func IsBehindMain(worktreePath string, remote string, mainBranch string) (bool, 
 
 // RefreshResult contains the result of a worktree refresh operation
 type RefreshResult struct {
-	WorktreePath    string
-	Branch          string
-	CommitsRebased  int
-	WasStashed      bool
-	StashRestored   bool
-	HasConflicts    bool
-	ConflictFiles   []string
-	Error           error
-	Skipped         bool
-	SkipReason      string
+	WorktreePath   string
+	Branch         string
+	CommitsRebased int
+	WasStashed     bool
+	StashRestored  bool
+	HasConflicts   bool
+	ConflictFiles  []string
+	Error          error
+	Skipped        bool
+	SkipReason     string
 }
 
 // RefreshWorktree syncs a worktree with the latest changes from the main branch.
