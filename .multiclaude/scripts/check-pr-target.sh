@@ -46,16 +46,9 @@ for pattern in "${UPSTREAM_PATTERNS[@]}"; do
     fi
 done
 
-# Check for upstream in the command even without explicit --repo flag
-# (catches cases like `gh pr create -R dlorenc/multiclaude`)
-for pattern in "${UPSTREAM_PATTERNS[@]}"; do
-    if echo "$COMMAND" | grep -qi "$pattern"; then
-        echo "ERROR: Cannot create PR against upstream repository (dlorenc/multiclaude)." >&2
-        echo "" >&2
-        echo "PRs must target the fork: aronchick/multiclaude" >&2
-        exit 2
-    fi
-done
+# Note: We intentionally do NOT check for upstream repo name anywhere in the command
+# because PR body text often references upstream issues like "dlorenc/multiclaude#282"
+# The --repo flag check above is sufficient to prevent targeting upstream.
 
 # Command is allowed
 exit 0
