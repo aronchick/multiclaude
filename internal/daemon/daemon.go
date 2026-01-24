@@ -1971,10 +1971,12 @@ func (d *Daemon) sendAgentDefinitionsToSupervisor(repoName, repoPath string, mqC
 			trackModePrompt := prompts.GenerateTrackingModePrompt(string(psConfig.TrackMode))
 			sb.WriteString(trackModePrompt)
 			sb.WriteString("\n\n")
-			// Also add fork workflow context
-			forkPrompt := prompts.GenerateForkWorkflowPrompt(forkConfig.UpstreamOwner, forkConfig.UpstreamRepo, forkConfig.UpstreamOwner)
-			sb.WriteString(forkPrompt)
-			sb.WriteString("\n\n")
+			// Also add fork workflow context - detect fork info from repo path
+			if forkInfo, err := prompts.DetectFork(repoPath); err == nil && forkInfo.IsFork {
+				forkPrompt := prompts.GenerateForkWorkflowPrompt(forkInfo)
+				sb.WriteString(forkPrompt)
+				sb.WriteString("\n\n")
+			}
 		}
 
 		sb.WriteString(def.Content)

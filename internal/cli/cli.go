@@ -5326,9 +5326,11 @@ func (c *CLI) writePRShepherdPromptFile(repoPath string, agentName string, psCon
 	// Add CLI documentation and slash commands
 	promptText = c.appendDocsAndSlashCommands(promptText)
 
-	// Add fork workflow context
-	forkContext := prompts.GenerateForkWorkflowPrompt(forkConfig.UpstreamOwner, forkConfig.UpstreamRepo, forkConfig.UpstreamOwner)
-	promptText = forkContext + "\n\n" + promptText
+	// Add fork workflow context - detect fork info from repo path
+	if forkInfo, err := prompts.DetectFork(repoPath); err == nil && forkInfo.IsFork {
+		forkContext := prompts.GenerateForkWorkflowPrompt(forkInfo)
+		promptText = forkContext + "\n\n" + promptText
+	}
 
 	// Add tracking mode configuration to the prompt
 	trackingConfig := prompts.GenerateTrackingModePrompt(string(psConfig.TrackMode))
@@ -5356,15 +5358,9 @@ func (c *CLI) writeWorkerPromptFile(repoPath string, agentName string, config Wo
 	// Add CLI documentation and slash commands
 	promptText = c.appendDocsAndSlashCommands(promptText)
 
-	// Add fork workflow context if working in a fork
-	if config.ForkConfig.IsFork {
-		// Get the fork owner from the GitHub URL
-		forkOwner := c.extractOwnerFromGitHubURL(repoPath)
-		forkWorkflow := prompts.GenerateForkWorkflowPrompt(
-			config.ForkConfig.UpstreamOwner,
-			config.ForkConfig.UpstreamRepo,
-			forkOwner,
-		)
+	// Add fork workflow context if working in a fork - detect from repo path
+	if forkInfo, err := prompts.DetectFork(repoPath); err == nil && forkInfo.IsFork {
+		forkWorkflow := prompts.GenerateForkWorkflowPrompt(forkInfo)
 		promptText = forkWorkflow + "\n---\n\n" + promptText
 	}
 
