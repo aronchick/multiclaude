@@ -13,14 +13,16 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
+	"reflect"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -77,88 +79,49 @@ func main() {
 	}
 }
 
-// verifyStateSchema checks that state.State fields are documented
+// verifyStateSchema checks that state structs/fields match the docs list.
 func verifyStateSchema() Verification {
 	v := Verification{Name: "State schema documentation"}
 
-	// Parse internal/state/state.go
-	fset := token.NewFileSet()
-	node, err := parser.ParseFile(fset, "internal/state/state.go", nil, parser.ParseComments)
+	codeStructs, err := parseStateStructsFromCode()
 	if err != nil {
-		v.Message = fmt.Sprintf("Failed to parse state.go: %v", err)
+		v.Message = err.Error()
 		return v
 	}
 
-	// Find struct definitions
-	structs := make(map[string][]string)
-	ast.Inspect(node, func(n ast.Node) bool {
-		typeSpec, ok := n.(*ast.TypeSpec)
-		if !ok {
-			return true
-		}
-
-		structType, ok := typeSpec.Type.(*ast.StructType)
-		if !ok {
-			return true
-		}
-
-		fields := []string{}
-		for _, field := range structType.Fields.List {
-			for _, name := range field.Names {
-				// Skip private fields
-				if !ast.IsExported(name.Name) {
-					continue
-				}
-				fields = append(fields, name.Name)
-			}
-		}
-
-		structs[typeSpec.Name.Name] = fields
-		return true
-	})
-
-	// Check important structs are documented
-	importantStructs := []string{
-		"State",
-		"Repository",
-		"Agent",
-		"TaskHistoryEntry",
-		"MergeQueueConfig",
-		"HookConfig",
-	}
-
-	docFile := "docs/extending/STATE_FILE_INTEGRATION.md"
-	docContent, err := os.ReadFile(docFile)
+	docStructs, err := parseStateStructsFromDocs()
 	if err != nil {
-		v.Message = fmt.Sprintf("Failed to read %s: %v", docFile, err)
+		v.Message = err.Error()
 		return v
 	}
 
-	missing := []string{}
-	for _, structName := range importantStructs {
-		if *verbose {
-			fmt.Printf("  Checking struct: %s\n", structName)
-		}
+	missingStructs := diffKeys(codeStructs, docStructs)
+	extraStructs := diffKeys(docStructs, codeStructs)
 
-		// Check if struct name appears in docs
-		if !strings.Contains(string(docContent), structName) {
-			missing = append(missing, structName)
-			continue
-		}
+	var missingFields []string
+	var extraFields []string
 
-		// Check if fields are documented (basic check)
-		fields := structs[structName]
-		for _, field := range fields {
-			// Convert field name to JSON format (snake_case)
-			jsonField := toSnakeCase(field)
-			if !strings.Contains(string(docContent), fmt.Sprintf(`"%s"`, jsonField)) {
-				missing = append(missing, fmt.Sprintf("%s.%s", structName, field))
-			}
-		}
+	for name, fields := range codeStructs {
+		docFields := docStructs[name]
+		missingFields = append(missingFields, diffListPrefixed(fields, docFields, name)...)
+		extraFields = append(extraFields, diffListPrefixed(docFields, fields, name)...)
 	}
 
-	if len(missing) > 0 {
-		v.Message = fmt.Sprintf("Missing or incomplete: %s", strings.Join(missing, ", "))
+	if len(missingStructs) > 0 || len(extraStructs) > 0 || len(missingFields) > 0 || len(extraFields) > 0 {
+		var parts []string
+		if len(missingStructs) > 0 {
+			parts = append(parts, fmt.Sprintf("missing structs: %s", strings.Join(missingStructs, ", ")))
+		}
+		if len(extraStructs) > 0 {
+			parts = append(parts, fmt.Sprintf("undocumented structs removed from code: %s", strings.Join(extraStructs, ", ")))
+		}
+		if len(missingFields) > 0 {
+			parts = append(parts, fmt.Sprintf("missing fields: %s", strings.Join(missingFields, ", ")))
+		}
+		if len(extraFields) > 0 {
+			parts = append(parts, fmt.Sprintf("fields documented but not in code: %s", strings.Join(extraFields, ", ")))
+		}
+		v.Message = strings.Join(parts, "; ")
 		return v
 	}
 
@@ -166,61 +129,43 @@ func verifyStateSchema() Verification {
 	return v
 }
 
-// verifyEventTypes checks that all event types are documented
+// verifyEventTypes checks that all event types are documented and not hallucinated.
 func verifyEventTypes() Verification {
 	v := Verification{Name: "Event types documentation"}
 
-	// Parse internal/events/events.go
-	fset := token.NewFileSet()
-	node, err := parser.ParseFile(fset, "internal/events/events.go", nil, parser.ParseComments)
+	codeEvents, eventsFilePresent, err := parseEventsFromCode()
 	if err != nil {
-		v.Message = fmt.Sprintf("Failed to parse events.go: %v", err)
+		v.Message = err.Error()
 		return v
 	}
 
-	// Find EventType constants
-	eventTypes := []string{}
-	ast.Inspect(node, func(n ast.Node) bool {
-		genDecl, ok := n.(*ast.GenDecl)
-		if !ok || genDecl.Tok != token.CONST {
-			return true
-		}
-
-		for _, spec := range genDecl.Specs {
-			valueSpec, ok := spec.(*ast.ValueSpec)
-			if !ok {
-				continue
-			}
-
-			for _, name := range valueSpec.Names {
-				if strings.HasPrefix(name.Name, "Event") {
-					eventTypes = append(eventTypes, name.Name)
-				}
-			}
-		}
-
-		return true
-	})
-
-	// Check if documented
-	docFile := "docs/extending/EVENT_HOOKS.md"
-	docContent, err := os.ReadFile(docFile)
+	docEvents, docStatus, err := parseEventsFromDocs()
 	if err != nil {
-		v.Message = fmt.Sprintf("Failed to read %s: %v", docFile, err)
+		v.Message = err.Error()
 		return v
 	}
 
-	missing := []string{}
-	for _, eventType := range eventTypes {
-		// Extract the actual event type string (e.g., EventAgentStarted -> agent_started)
-		// This is a simplified check - we just check if the constant name appears
-		if !strings.Contains(string(docContent), eventType) {
-			missing = append(missing, eventType)
+	if !eventsFilePresent {
+		if docStatus != "planned" && len(docEvents) > 0 {
+			v.Message = "events not implemented in code; docs must mark as [PLANNED] and avoid listing concrete event types"
+			return v
 		}
+		v.Passed = true
+		return v
 	}
 
-	if len(missing) > 0 {
-		v.Message = fmt.Sprintf("Undocumented event types: %s", strings.Join(missing, ", "))
+	missing := diffList(codeEvents, docEvents)
+	extra := diffList(docEvents, codeEvents)
+
+	if len(missing) > 0 || len(extra) > 0 {
+		var parts []string
+		if len(missing) > 0 {
+			parts = append(parts, fmt.Sprintf("missing events: %s", strings.Join(missing, ", ")))
+		}
+		if len(extra) > 0 {
+			parts = append(parts, fmt.Sprintf("events documented but not in code: %s", strings.Join(extra, ", ")))
+		}
+		v.Message = strings.Join(parts, "; ")
 		return v
 	}
 
@@ -228,62 +173,34 @@ func verifyEventTypes() Verification {
 	return v
 }
 
-// verifySocketCommands checks that all socket commands are documented
+// verifySocketCommands checks that socket commands in code and docs are aligned.
 func verifySocketCommands() Verification {
 	v := Verification{Name: "Socket commands documentation"}
 
-	// Find all case statements in handleRequest
-	commands := []string{}
-
-	file, err := os.Open("internal/daemon/daemon.go")
+	codeCommands, err := parseSocketCommandsFromCode()
 	if err != nil {
-		v.Message = fmt.Sprintf("Failed to open daemon.go: %v", err)
-		return v
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	inSwitch := false
-	casePattern := regexp.MustCompile(`case\s+"([^"]+)":`)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if strings.Contains(line, "switch req.Command") {
-			inSwitch = true
-			continue
-		}
-
-		if inSwitch {
-			if strings.Contains(line, "default:") {
-				break
-			}
-
-			matches := casePattern.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				commands = append(commands, matches[1])
-			}
-		}
-	}
-
-	// Check if documented
-	docFile := "docs/extending/SOCKET_API.md"
-	docContent, err := os.ReadFile(docFile)
-	if err != nil {
-		v.Message = fmt.Sprintf("Failed to read %s: %v", docFile, err)
+		v.Message = err.Error()
 		return v
 	}
 
-	missing := []string{}
-	for _, cmd := range commands {
-		// Check for command in documentation (should appear as "#### command_name")
-		if !strings.Contains(string(docContent), cmd) {
-			missing = append(missing, cmd)
-		}
+	docCommands, err := parseSocketCommandsFromDocs()
+	if err != nil {
+		v.Message = err.Error()
+		return v
 	}
 
-	if len(missing) > 0 {
-		v.Message = fmt.Sprintf("Undocumented commands: %s", strings.Join(missing, ", "))
+	missing := diffList(codeCommands, docCommands)
+	extra := diffList(docCommands, codeCommands)
+
+	if len(missing) > 0 || len(extra) > 0 {
+		var parts []string
+		if len(missing) > 0 {
+			parts = append(parts, fmt.Sprintf("missing commands: %s", strings.Join(missing, ", ")))
+		}
+		if len(extra) > 0 {
+			parts = append(parts, fmt.Sprintf("commands documented but not in code: %s", strings.Join(extra, ", ")))
+		}
+		v.Message = strings.Join(parts, "; ")
 		return v
 	}
 
@@ -291,11 +208,10 @@ func verifySocketCommands() Verification {
 	return v
 }
 
-// verifyFilePaths checks that file paths mentioned in docs exist
+// verifyFilePaths checks that file paths mentioned in docs exist.
 func verifyFilePaths() Verification {
 	v := Verification{Name: "File path references"}
 
-	// Check all extension docs
 	docFiles := []string{
 		"docs/EXTENSIBILITY.md",
 		"docs/extending/STATE_FILE_INTEGRATION.md",
@@ -304,11 +220,6 @@ func verifyFilePaths() Verification {
 		"docs/extending/SOCKET_API.md",
 	}
 
-	// Patterns to find file references
-	// Looking for things like:
-	// - `internal/state/state.go`
-	// - `cmd/multiclaude-web/main.go`
-	// - `pkg/config/config.go`
 	filePattern := regexp.MustCompile("`((?:internal|pkg|cmd)/[^`]+\\.go)`")
 
 	missing := []string{}
@@ -324,7 +235,6 @@ func verifyFilePaths() Verification {
 			if len(match) > 1 {
 				filePath := match[1]
 
-				// Check if file exists
 				if _, err := os.Stat(filePath); os.IsNotExist(err) {
 					missing = append(missing, fmt.Sprintf("%s (referenced in %s)", filePath, docFile))
 				}
@@ -341,7 +251,311 @@ func verifyFilePaths() Verification {
 	return v
 }
 
-// toSnakeCase converts PascalCase to snake_case
+// parseStateStructsFromCode extracts json field names for tracked structs.
+func parseStateStructsFromCode() (map[string][]string, error) {
+	tracked := map[string]struct{}{
+		"State":            {},
+		"Repository":       {},
+		"Agent":            {},
+		"TaskHistoryEntry": {},
+		"MergeQueueConfig": {},
+		"PRShepherdConfig": {},
+		"ForkConfig":       {},
+	}
+
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, "internal/state/state.go", nil, parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse state.go: %w", err)
+	}
+
+	structs := make(map[string][]string)
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		typeSpec, ok := n.(*ast.TypeSpec)
+		if !ok {
+			return true
+		}
+
+		structType, ok := typeSpec.Type.(*ast.StructType)
+		if !ok {
+			return true
+		}
+
+		if _, wanted := tracked[typeSpec.Name.Name]; !wanted {
+			return true
+		}
+
+		var fields []string
+		for _, field := range structType.Fields.List {
+			// skip embedded or unexported fields
+			if len(field.Names) == 0 {
+				continue
+			}
+			for _, name := range field.Names {
+				if !ast.IsExported(name.Name) {
+					continue
+				}
+
+				jsonName := jsonTag(field)
+				if jsonName == "" {
+					jsonName = toSnakeCase(name.Name)
+				}
+				if jsonName == "-" || jsonName == "" {
+					continue
+				}
+				fields = append(fields, jsonName)
+			}
+		}
+
+		structs[typeSpec.Name.Name] = uniqueSorted(fields)
+		return true
+	})
+
+	return structs, nil
+}
+
+// parseStateStructsFromDocs reads state struct definitions from marker comments.
+func parseStateStructsFromDocs() (map[string][]string, error) {
+	docFile := "docs/extending/STATE_FILE_INTEGRATION.md"
+	content, err := os.ReadFile(docFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", docFile, err)
+	}
+
+	pattern := regexp.MustCompile(`(?m)<!--\s*state-struct:\s*([A-Za-z0-9_]+)\s+([^>]+?)-->`)
+	matches := pattern.FindAllStringSubmatch(string(content), -1)
+
+	structs := make(map[string][]string)
+	for _, m := range matches {
+		if len(m) < 3 {
+			continue
+		}
+		name := strings.TrimSpace(m[1])
+		fields := uniqueSorted(strings.Fields(m[2]))
+		structs[name] = fields
+	}
+
+	if len(structs) == 0 {
+		return nil, fmt.Errorf("no state-struct markers found in %s", docFile)
+	}
+
+	return structs, nil
+}
+
+// parseEventsFromCode returns event names and a flag indicating if the file exists.
+func parseEventsFromCode() ([]string, bool, error) {
+	path := "internal/events/events.go"
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("failed to stat %s: %w", path, err)
+	}
+
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		return nil, true, fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+
+	var events []string
+	ast.Inspect(node, func(n ast.Node) bool {
+		genDecl, ok := n.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.CONST {
+			return true
+		}
+
+		for _, spec := range genDecl.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+
+			for _, name := range valueSpec.Names {
+				if strings.HasPrefix(name.Name, "Event") {
+					events = append(events, name.Name)
+				}
+			}
+		}
+		return true
+	})
+
+	return uniqueSorted(events), true, nil
+}
+
+// parseEventsFromDocs reads event names (or planned status) from marker comments.
+func parseEventsFromDocs() ([]string, string, error) {
+	docFile := "docs/extending/EVENT_HOOKS.md"
+	content, err := os.ReadFile(docFile)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read %s: %w", docFile, err)
+	}
+
+	matches := regexp.MustCompile(`(?m)<!--\s*events:\s*([^>]+?)-->`).FindStringSubmatch(string(content))
+	if len(matches) < 2 {
+		return nil, "", fmt.Errorf("no events marker found in %s", docFile)
+	}
+
+	raw := strings.Fields(matches[1])
+	if len(raw) == 1 && strings.EqualFold(raw[0], "planned") {
+		return nil, "planned", nil
+	}
+
+	return uniqueSorted(raw), "", nil
+}
+
+// parseSocketCommandsFromCode extracts socket commands from handleRequest.
+func parseSocketCommandsFromCode() ([]string, error) {
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, "internal/daemon/daemon.go", nil, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse daemon.go: %w", err)
+	}
+
+	var commands []string
+
+	ast.Inspect(node, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != "handleRequest" {
+			return true
+		}
+
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			sw, ok := n.(*ast.SwitchStmt)
+			if !ok || !isReqCommand(sw.Tag) {
+				return true
+			}
+
+			for _, stmt := range sw.Body.List {
+				clause, ok := stmt.(*ast.CaseClause)
+				if !ok {
+					continue
+				}
+				for _, expr := range clause.List {
+					lit, ok := expr.(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						continue
+					}
+					cmd, err := strconv.Unquote(lit.Value)
+					if err == nil && cmd != "" {
+						commands = append(commands, cmd)
+					}
+				}
+			}
+			return true
+		})
+		return false
+	})
+
+	return uniqueSorted(commands), nil
+}
+
+// parseSocketCommandsFromDocs reads socket command list from marker comments.
+func parseSocketCommandsFromDocs() ([]string, error) {
+	docFile := "docs/extending/SOCKET_API.md"
+	content, err := os.ReadFile(docFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", docFile, err)
+	}
+
+	list := parseListFromComment(string(content), "socket-commands")
+	if len(list) == 0 {
+		return nil, fmt.Errorf("no socket-commands marker found in %s", docFile)
+	}
+	return list, nil
+}
+
+// parseListFromComment extracts a newline-delimited list from an HTML comment label.
+func parseListFromComment(content, label string) []string {
+	pattern := fmt.Sprintf("(?s)<!--\\s*%s:\\s*(.*?)-->", regexp.QuoteMeta(label))
+	re := regexp.MustCompile(pattern)
+	matches := re.FindStringSubmatch(content)
+	if len(matches) < 2 {
+		return nil
+	}
+
+	var items []string
+	for _, line := range strings.Split(matches[1], "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		items = append(items, line)
+	}
+	return uniqueSorted(items)
+}
+
+// isReqCommand checks if the switch tag is req.Command.
+func isReqCommand(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return id.Name == "req" && sel.Sel != nil && sel.Sel.Name == "Command"
+}
+
+// jsonTag returns the json tag value if present.
+func jsonTag(field *ast.Field) string {
+	if field.Tag == nil {
+		return ""
+	}
+	raw := strings.Trim(field.Tag.Value, "`")
+	tag := reflect.StructTag(raw).Get("json")
+	if tag == "" {
+		return ""
+	}
+	parts := strings.Split(tag, ",")
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
+}
+
+// diffList returns items in a but not in b.
+func diffList(a, b []string) []string {
+	setB := make(map[string]struct{}, len(b))
+	for _, item := range b {
+		setB[item] = struct{}{}
+	}
+	var diff []string
+	for _, item := range a {
+		if _, ok := setB[item]; !ok {
+			diff = append(diff, item)
+		}
+	}
+	return uniqueSorted(diff)
+}
+
+// diffListPrefixed returns items in a but not in b, prefixed with struct name.
+func diffListPrefixed(a, b []string, prefix string) []string {
+	items := diffList(a, b)
+	for i, item := range items {
+		items[i] = fmt.Sprintf("%s.%s", prefix, item)
+	}
+	return items
+}
+
+// diffKeys returns keys in a but not in b.
+func diffKeys(a, b map[string][]string) []string {
+	keysB := make(map[string]struct{}, len(b))
+	for k := range b {
+		keysB[k] = struct{}{}
+	}
+	var diff []string
+	for k := range a {
+		if _, ok := keysB[k]; !ok {
+			diff = append(diff, k)
+		}
+	}
+	return uniqueSorted(diff)
+}
+
+// toSnakeCase converts PascalCase to snake_case.
 func toSnakeCase(s string) string {
 	var result []rune
 	for i, r := range s {
@@ -351,4 +565,20 @@ func toSnakeCase(s string) string {
 		result = append(result, r)
 	}
 	return strings.ToLower(string(result))
+}
+
+// uniqueSorted returns a sorted unique copy of the slice.
+func uniqueSorted(items []string) []string {
+	set := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		set[item] = struct{}{}
+	}
+
+	out := make([]string, 0, len(set))
+	for item := range set {
+		out = append(out, item)
+	}
+
+	sort.Strings(out)
+	return out
 }

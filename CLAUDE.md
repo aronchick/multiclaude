@@ -208,33 +208,31 @@ Multiclaude is designed for extension **without modifying the core binary**. Ext
 | Extension Point | Use Cases | Documentation |
 |----------------|-----------|---------------|
 | **State File** | Monitoring, dashboards, analytics | [`docs/extending/STATE_FILE_INTEGRATION.md`](docs/extending/STATE_FILE_INTEGRATION.md) |
-| **Event Hooks** | Notifications, webhooks, alerting | [`docs/extending/EVENT_HOOKS.md`](docs/extending/EVENT_HOOKS.md) |
 | **Socket API** | Custom CLIs, automation, control planes | [`docs/extending/SOCKET_API.md`](docs/extending/SOCKET_API.md) |
-| **Web UIs** | Visual monitoring dashboards | [`docs/extending/WEB_UI_DEVELOPMENT.md`](docs/extending/WEB_UI_DEVELOPMENT.md) |
+| **Event Hooks** | [PLANNED] (not implemented) | [`docs/extending/EVENT_HOOKS.md`](docs/extending/EVENT_HOOKS.md) |
+| **Web UIs** | [PLANNED] (not implemented) | [`docs/extending/WEB_UI_DEVELOPMENT.md`](docs/extending/WEB_UI_DEVELOPMENT.md) |
 
 **Start here:** [`docs/EXTENSIBILITY.md`](docs/EXTENSIBILITY.md) - Complete extension guide
 
 ### For LLMs: Keeping Extension Docs Updated
 
-**CRITICAL:** When modifying multiclaude core, check if extension documentation needs updates:
+**CRITICAL:** When modifying multiclaude core, keep extension documentation **code-first and drift-free**. Never document an API/command/event that does not exist on `main`. If something is planned, mark it `[PLANNED]` until it ships. Always run `go run ./cmd/verify-docs` on doc or API changes.
 
 1. **State Schema Changes** (`internal/state/state.go`)
    - Update: [`docs/extending/STATE_FILE_INTEGRATION.md`](docs/extending/STATE_FILE_INTEGRATION.md)
    - Update schema reference section
    - Update all code examples showing state structure
-   - Run: `go run cmd/verify-docs/main.go` (when implemented)
+   - Run: `go run ./cmd/verify-docs`
 
-2. **Event Type Changes** (`internal/events/events.go`)
-   - Update: [`docs/extending/EVENT_HOOKS.md`](docs/extending/EVENT_HOOKS.md)
-   - Update event type table
-   - Update event JSON format examples
-   - Add new event examples if new types added
-
-3. **Socket Command Changes** (`internal/daemon/daemon.go`)
+2. **Socket Command Changes** (`internal/daemon/daemon.go`)
    - Update: [`docs/extending/SOCKET_API.md`](docs/extending/SOCKET_API.md)
    - Add/update command reference entries
    - Add code examples for new commands
    - Update client library examples if needed
+
+3. **Event Type Changes** (`internal/events/events.go`) *(only after events exist)*
+   - Update: [`docs/extending/EVENT_HOOKS.md`](docs/extending/EVENT_HOOKS.md)
+   - Mark planned items as `[PLANNED]` until implemented
 
 4. **Runtime Directory Changes** (`pkg/config/config.go`)
    - Update: All extension docs that reference file paths
