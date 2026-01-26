@@ -50,6 +50,7 @@ func TestAgentTemplatesCopiedOnInit(t *testing.T) {
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
 		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
+		ArchiveDir:      filepath.Join(tmpDir, "archive"),
 	}
 
 	if err := paths.EnsureDirectories(); err != nil {
@@ -386,6 +387,7 @@ func TestAgentsSpawnCommand(t *testing.T) {
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
 		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
+		ArchiveDir:      filepath.Join(tmpDir, "archive"),
 	}
 
 	if err := paths.EnsureDirectories(); err != nil {
@@ -510,6 +512,7 @@ func TestAgentDefinitionsSentToSupervisor(t *testing.T) {
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
 		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
+		ArchiveDir:      filepath.Join(tmpDir, "archive"),
 	}
 
 	if err := paths.EnsureDirectories(); err != nil {
@@ -615,6 +618,7 @@ func TestSpawnPersistentAgent(t *testing.T) {
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
 		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
+		ArchiveDir:      filepath.Join(tmpDir, "archive"),
 	}
 
 	if err := paths.EnsureDirectories(); err != nil {
@@ -703,6 +707,7 @@ func TestSpawnEphemeralAgent(t *testing.T) {
 		MessagesDir:     filepath.Join(tmpDir, "messages"),
 		OutputDir:       filepath.Join(tmpDir, "output"),
 		ClaudeConfigDir: filepath.Join(tmpDir, "claude-config"),
+		ArchiveDir:      filepath.Join(tmpDir, "archive"),
 	}
 
 	if err := paths.EnsureDirectories(); err != nil {
