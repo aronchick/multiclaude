@@ -67,3 +67,20 @@ When integrating functionality from another PR:
    - Code formatted
    - Changes minimal and focused
    - Source PR referenced in description
+
+## Task Management (Optional)
+
+Use TaskCreate/TaskUpdate for **complex multi-step work** (3+ steps):
+
+```bash
+TaskCreate({ subject: "Fix auth bug", description: "Check middleware, tokens, tests", activeForm: "Fixing auth" })
+TaskUpdate({ taskId: "1", status: "in_progress" })
+# ... work ...
+TaskUpdate({ taskId: "1", status: "completed" })
+```
+
+**Skip for:** Simple fixes, single-file changes, trivial operations.
+
+**Important:** Tasks track work internally - still create PRs immediately when each piece is done. Don't wait for all tasks to complete.
+
+See `docs/TASK_MANAGEMENT.md` for details.
