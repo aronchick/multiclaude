@@ -16,6 +16,7 @@ import (
 	"github.com/dlorenc/multiclaude/internal/agents"
 	"github.com/dlorenc/multiclaude/internal/bugreport"
 	"github.com/dlorenc/multiclaude/internal/daemon"
+	"github.com/dlorenc/multiclaude/internal/diagnostics"
 	"github.com/dlorenc/multiclaude/internal/errors"
 	"github.com/dlorenc/multiclaude/internal/fork"
 	"github.com/dlorenc/multiclaude/internal/format"
@@ -718,6 +719,14 @@ func (c *CLI) registerCommands() {
 		Description: "Generate a diagnostic bug report",
 		Usage:       "multiclaude bug [--output <file>] [--verbose] [description]",
 		Run:         c.bugReport,
+	}
+
+	// Diagnostics command
+	c.rootCmd.Subcommands["diagnostics"] = &Command{
+		Name:        "diagnostics",
+		Description: "Show system diagnostics in machine-readable format",
+		Usage:       "multiclaude diagnostics [--json] [--output <file>]",
+		Run:         c.diagnostics,
 	}
 
 	// Version command
@@ -5936,6 +5945,38 @@ func (c *CLI) bugReport(args []string) error {
 
 	// Print to stdout
 	fmt.Print(markdown)
+	return nil
+}
+
+// diagnostics generates system diagnostics in machine-readable format
+func (c *CLI) diagnostics(args []string) error {
+	flags, _ := ParseFlags(args)
+
+	// Create collector and generate report
+	collector := diagnostics.NewCollector(c.paths, Version)
+	report, err := collector.Collect()
+	if err != nil {
+		return fmt.Errorf("failed to collect diagnostics: %w", err)
+	}
+
+	// Always output as pretty JSON by default (unless --json=false for compact)
+	prettyJSON := flags["json"] != "false"
+	jsonOutput, err := report.ToJSON(prettyJSON)
+	if err != nil {
+		return fmt.Errorf("failed to format diagnostics as JSON: %w", err)
+	}
+
+	// Check if output file specified
+	if outputFile, ok := flags["output"]; ok {
+		if err := os.WriteFile(outputFile, []byte(jsonOutput), 0644); err != nil {
+			return fmt.Errorf("failed to write diagnostics to %s: %w", outputFile, err)
+		}
+		fmt.Printf("Diagnostics written to: %s\n", outputFile)
+		return nil
+	}
+
+	// Print to stdout
+	fmt.Println(jsonOutput)
 	return nil
 }
 
