@@ -5527,7 +5527,7 @@ func (c *CLI) restartClaude(args []string) error {
 			err = process.Signal(syscall.Signal(0))
 			if err == nil {
 				// Process is still running - provide helpful error
-				return fmt.Errorf("Claude is already running (PID %d) in this context.\n\nTo restart:\n  1. Exit Claude first (Ctrl+D or /exit)\n  2. Then run 'multiclaude claude' again\n\nOr attach to the running session:\n  multiclaude attach %s", agent.PID, agentName)
+				return fmt.Errorf("claude is already running (PID %d) in this context.\n\nTo restart:\n  1. Exit Claude first (Ctrl+D or /exit)\n  2. Then run 'multiclaude claude' again\n\nOr attach to the running session:\n  multiclaude attach %s", agent.PID, agentName)
 			}
 		}
 	}
@@ -5547,7 +5547,7 @@ func (c *CLI) restartClaude(args []string) error {
 			if process, err := os.FindProcess(currentPID); err == nil {
 				if err := process.Signal(syscall.Signal(0)); err == nil {
 					// There's a different running process in the pane
-					return fmt.Errorf("A process (PID %d) is already running in this tmux pane.\n\nTo restart:\n  1. Exit the current process first\n  2. Then run 'multiclaude claude' again\n\nOr attach to view:\n  multiclaude attach %s", currentPID, agentName)
+					return fmt.Errorf("a process (PID %d) is already running in this tmux pane.\n\nTo restart:\n  1. Exit the current process first\n  2. Then run 'multiclaude claude' again\n\nOr attach to view:\n  multiclaude attach %s", currentPID, agentName)
 				}
 			}
 		}
